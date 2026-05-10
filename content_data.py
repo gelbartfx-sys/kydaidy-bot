@@ -234,6 +234,18 @@ PRODUCTS_MENU = """*Что доступно сейчас:*
 — Алёна"""
 
 
+# Hardcoded fallback for Tribute post chat_id + message_id. Render free tier
+# doesn't have persistent disk, so the SQLite tribute_posts table is wiped on
+# every deploy. Until we move to Postgres, hardcode the values that were
+# captured via /capture so /products keeps copying real Tribute posts.
+# Source: Render logs, "auto-captured ... chat=N msg=M".
+PRODUCT_TRIBUTE_POSTS_DEFAULT = {
+    "manifest_1on1": (680319075, 28),
+    "manifest_club": (680319075, 30),
+    # "manifest_7": (..., ...),  # not captured yet — Tribute verification pending
+}
+
+
 # Fallback-тексты по одному на продукт — если соответствующий пост Tribute
 # ещё не захвачен. Каждый идёт отдельным сообщением с превью ссылки.
 PRODUCT_FALLBACKS = {

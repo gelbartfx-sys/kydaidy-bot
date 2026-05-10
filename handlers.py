@@ -21,6 +21,7 @@ from content_data import (
     WELCOME_NO_POVOROT,
     PRODUCTS_MENU,
     PRODUCT_FALLBACKS,
+    PRODUCT_TRIBUTE_POSTS_DEFAULT,
     CLUB_DESCRIPTION,
 )
 
@@ -186,20 +187,23 @@ async def show_one_product(callback: CallbackQuery):
     user_id = callback.from_user.id
     bot = callback.bot
 
+    # Try DB first, then hardcoded defaults (Render free wipes SQLite on deploy)
     post = await get_tribute_post(code)
+    src_chat = src_msg = None
     if post:
+        src_chat, src_msg = post["src_chat_id"], post["src_message_id"]
+    elif code in PRODUCT_TRIBUTE_POSTS_DEFAULT:
+        src_chat, src_msg = PRODUCT_TRIBUTE_POSTS_DEFAULT[code]
+
+    if src_chat and src_msg:
         try:
-            await bot.copy_message(
-                chat_id=user_id,
-                from_chat_id=post["src_chat_id"],
-                message_id=post["src_message_id"],
-            )
+            await bot.copy_message(chat_id=user_id, from_chat_id=src_chat, message_id=src_msg)
             await callback.answer()
             return
         except Exception as e:
-            logger.warning(f"copy_message failed for {code}: {e}")
+            logger.warning(f"copy_message failed for {code} (chat={src_chat} msg={src_msg}): {e}")
 
-    # Fallback: текст со ссылкой-превью если пост ещё не захвачен через /capture
+    # Fallback: текст со ссылкой-превью если пост ещё не захвачен / не доступен для копирования
     await bot.send_message(user_id, PRODUCT_FALLBACKS[code], parse_mode="Markdown")
     await callback.answer()
 
