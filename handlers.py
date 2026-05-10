@@ -235,10 +235,10 @@ async def cmd_capture(message: Message, command: CommandObject):
     src_message_id = target.message_id
     await set_tribute_post(code, src_chat_id, src_message_id)
     await message.reply(
-        f"✅ Захвачено: *{code}*\n"
+        f"✅ Захвачено: {code}\n"
         f"chat_id={src_chat_id}, message_id={src_message_id}\n\n"
         f"Теперь /products будет копировать это сообщение пользователям.",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
 
 
@@ -261,9 +261,9 @@ async def capture_callback(callback: CallbackQuery):
 
     await set_tribute_post(code, src_chat_id, src_message_id)
     await callback.message.edit_text(
-        f"✅ Захвачено: *{code}*\nchat_id={src_chat_id}, message_id={src_message_id}\n\n"
+        f"✅ Захвачено: {code}\nchat_id={src_chat_id}, message_id={src_message_id}\n\n"
         f"Теперь /products будет копировать это сообщение пользователям.",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer("Сохранено")
 
@@ -364,11 +364,11 @@ async def auto_capture_tribute(message: Message):
 
     if code:
         await set_tribute_post(code, src_chat_id, src_message_id)
+        # parse_mode=None — caption Tribute может содержать спецсимволы, ломающие Markdown
         await message.reply(
-            f"✅ Захвачено: *{code}*\n"
-            f"_(определено по тексту: «{caption[:60]}…»)_\n\n"
+            f"✅ Захвачено: {code}\n\n"
             f"Теперь /products будет копировать этот пост пользователям.",
-            parse_mode="Markdown",
+            parse_mode=None,
         )
         logger.info(f"auto-captured {code} chat={src_chat_id} msg={src_message_id}")
         return
