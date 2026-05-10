@@ -44,7 +44,22 @@ class DMInspectMiddleware(BaseMiddleware):
         m = getattr(event, "message", None)
         if m and m.chat and m.chat.type == "private":
             via = m.via_bot.username if m.via_bot else None
-            fwd = type(m.forward_origin).__name__ if m.forward_origin else None
+            fwd_type = type(m.forward_origin).__name__ if m.forward_origin else None
+            fwd_chat_id = None
+            fwd_msg_id = None
+            fwd_chat_title = None
+            if m.forward_origin:
+                # MessageOriginChannel has .chat and .message_id
+                # MessageOriginUser has .sender_user
+                # MessageOriginChat has .sender_chat
+                if hasattr(m.forward_origin, "chat") and m.forward_origin.chat:
+                    fwd_chat_id = m.forward_origin.chat.id
+                    fwd_chat_title = m.forward_origin.chat.title
+                if hasattr(m.forward_origin, "message_id"):
+                    fwd_msg_id = m.forward_origin.message_id
+                if hasattr(m.forward_origin, "sender_chat") and m.forward_origin.sender_chat:
+                    fwd_chat_id = m.forward_origin.sender_chat.id
+                    fwd_chat_title = m.forward_origin.sender_chat.title
             sender_chat = m.sender_chat.id if m.sender_chat else None
             from_user_id = m.from_user.id if m.from_user else None
             txt = (m.text or m.caption or "")[:80]
@@ -54,7 +69,10 @@ class DMInspectMiddleware(BaseMiddleware):
                 f"from_user={from_user_id} "
                 f"chat={m.chat.id} "
                 f"via=@{via} "
-                f"fwd_origin={fwd} "
+                f"fwd_origin={fwd_type} "
+                f"fwd_chat_id={fwd_chat_id} "
+                f"fwd_chat_title={fwd_chat_title!r} "
+                f"fwd_msg_id={fwd_msg_id} "
                 f"sender_chat={sender_chat} "
                 f"photo={bool(m.photo)} "
                 f"buttons={bool(m.reply_markup)} "

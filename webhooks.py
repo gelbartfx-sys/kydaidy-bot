@@ -109,34 +109,90 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         return web.Response(status=500, text=str(e))
 
 
+_CHANNEL_BY_PRODUCT = {
+    "manifest_7": "manifest_7_channel_id",
+    "manifest_club": "manifest_club_channel_id",
+    "manifest_plus": "manifest_plus_channel_id",
+}
+
+_BASE_TEXTS = {
+    "manifest_7": (
+        "✅ Спасибо. «Манифест 7» — твой.\n\n"
+        "Внутри канала: PDF-воркбук на 35 страниц + 7 аудио-практик от Алёны.\n\n"
+        "Прохождение в твоём темпе. Никаких обещаний быстрого результата."
+    ),
+    "manifest_club": (
+        "✅ Добро пожаловать в Клуб «Манифест».\n\n"
+        "Каждое утро в 6:00 — «Манифест дня», голосовое 5–7 минут.\n"
+        "По воскресеньям — длинное «Письмо к тебе»."
+    ),
+    "manifest_plus": (
+        "✅ «Манифест+» подключён.\n\n"
+        "VIP-канал + персональный отклик 1×/неделя.\n"
+        "Я свяжусь с тобой лично в течение 1–2 дней — для приветственного звонка."
+    ),
+    "manifest_1on1": (
+        "✅ Запись на «Манифест 1:1» оплачена.\n\n"
+        "Я свяжусь с тобой в течение 24 часов для согласования времени сессии."
+    ),
+}
+
+
+async def _create_personal_invite(bot: Bot, channel_id: int, tg_id: int, product_code: str) -> str | None:
+    """Generate a unique, single-use, 7-day invite link for this purchase."""
+    import time
+    expire = int(time.time()) + 7 * 24 * 3600
+    try:
+        invite = await bot.create_chat_invite_link(
+            chat_id=channel_id,
+            name=f"{product_code}-{tg_id}",
+            member_limit=1,
+            expire_date=expire,
+        )
+        return invite.invite_link
+    except Exception as e:
+        logger.error(f"create_chat_invite_link failed for {product_code} chat={channel_id} user={tg_id}: {e}")
+        return None
+
+
 async def _grant_access(bot: Bot, tg_id: int, product_code: str):
-    """Выдать доступ к продукту после оплаты."""
-    messages = {
-        "manifest_7": (
-            "✅ Спасибо. «Манифест 7» — твой.\n\n"
-            "Доступ к воркбуку и 7 аудио-практикам в личном кабинете: /cabinet\n\n"
-            "Никаких обещаний быстрого результата. Прохождение в твоём темпе.\n\n— Алёна"
-        ),
-        "manifest_club": (
-            "✅ Добро пожаловать в Клуб «Манифест».\n\n"
-            "Каждое утро в 6:00 — «Манифест дня». Первое голосовое придёт завтра.\n\n"
-            "Закрытый канал: https://t.me/+XXXX (заменить ссылку)\n\n— Алёна"
-        ),
-        "manifest_plus": (
-            "✅ «Манифест+» подключён.\n\n"
-            "Закрытый VIP-канал: https://t.me/+YYYY (заменить ссылку)\n\n"
-            "Я свяжусь с тобой лично в течение 1–2 дней — для приветственного звонка.\n\n— Алёна"
-        ),
-        "manifest_1on1": (
-            "✅ Запись на «Манифест 1:1» оплачена.\n\n"
-            "Я свяжусь с тобой в течение 24 часов для согласования времени сессии.\n\n— Алёна"
-        ),
-    }
-    text = messages.get(product_code, f"✅ Оплата получена. Спасибо.")
+    """Выдать доступ к продукту после оплаты.
+
+    Для канальных продуктов (manifest_7, manifest_club, manifest_plus) —
+    генерируем уникальную одноразовую invite-ссылку с лимитом 1 пользователь
+    и сроком 7 дней через Bot API createChatInviteLink.
+    """
+    text = _BASE_TEXTS.get(product_code, "✅ Оплата получена. Спасибо.")
+
+    channel_attr = _CHANNEL_BY_PRODUCT.get(product_code)
+    if channel_attr:
+        channel_id = getattr(settings, channel_attr, 0)
+        if channel_id:
+            invite_url = await _create_personal_invite(bot, channel_id, tg_id, product_code)
+            if invite_url:
+                text += f"\n\n🔑 Твоя личная ссылка-доступ (одноразовая, 7 дней):\n{invite_url}"
+            else:
+                text += "\n\n_Если ссылки не пришло — напиши @kydaidy._"
+        else:
+            logger.warning(f"channel_id not configured for {product_code} — sending text only")
+            text += "\n\n_Сейчас Алёна свяжется с тобой лично._"
+
+    text += "\n\n— Алёна"
+
     try:
         await bot.send_message(tg_id, text)
     except Exception as e:
         logger.error(f"Failed to send access message to {tg_id}: {e}")
+
+    # Notify admin about the purchase (for manifest_1on1 — Алёна вручную пишет)
+    if product_code == "manifest_1on1" and settings.tg_admin_id:
+        try:
+            await bot.send_message(
+                settings.tg_admin_id,
+                f"💬 Manifest 1:1 продан\nuser tg_id={tg_id}\nNeed to schedule call.",
+            )
+        except Exception:
+            pass
 
 
 def setup_webhooks(app: web.Application, bot: Bot):
