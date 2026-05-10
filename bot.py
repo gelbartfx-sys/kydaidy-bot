@@ -16,9 +16,10 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import Update
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -35,6 +36,33 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class DMInspectMiddleware(BaseMiddleware):
+    """Logs every DM update so we can see exactly what arrives from
+    Tribute mini-app share. Does not interfere with normal handlers."""
+
+    async def __call__(self, handler, event: Update, data):
+        m = getattr(event, "message", None)
+        if m and m.chat and m.chat.type == "private":
+            via = m.via_bot.username if m.via_bot else None
+            fwd = type(m.forward_origin).__name__ if m.forward_origin else None
+            sender_chat = m.sender_chat.id if m.sender_chat else None
+            from_user_id = m.from_user.id if m.from_user else None
+            txt = (m.text or m.caption or "")[:80]
+            logger.info(
+                f"DM update_id={event.update_id} "
+                f"msg_id={m.message_id} "
+                f"from_user={from_user_id} "
+                f"chat={m.chat.id} "
+                f"via=@{via} "
+                f"fwd_origin={fwd} "
+                f"sender_chat={sender_chat} "
+                f"photo={bool(m.photo)} "
+                f"buttons={bool(m.reply_markup)} "
+                f"text={txt!r}"
+            )
+        return await handler(event, data)
+
+
 async def main():
     await init_db()
 
@@ -43,6 +71,7 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
     )
     dp = Dispatcher()
+    dp.update.outer_middleware(DMInspectMiddleware())
     dp.include_router(router)
 
     # Запуск nurture-tick каждый час
