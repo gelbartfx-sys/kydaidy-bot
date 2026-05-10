@@ -240,9 +240,9 @@ PRODUCTS_MENU = """*Что доступно сейчас:*
 # captured via /capture so /products keeps copying real Tribute posts.
 # Source: Render logs, "auto-captured ... chat=N msg=M".
 PRODUCT_TRIBUTE_POSTS_DEFAULT = {
+    "manifest_7": (680319075, 44),
     "manifest_1on1": (680319075, 28),
     "manifest_club": (680319075, 30),
-    # "manifest_7": (..., ...),  # not captured yet — Tribute verification pending
 }
 
 
