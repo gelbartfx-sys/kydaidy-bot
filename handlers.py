@@ -246,9 +246,8 @@ async def cmd_capture(message: Message, command: CommandObject):
 
 @router.callback_query(F.data.startswith("cap:"))
 async def capture_callback(callback: CallbackQuery):
-    if callback.from_user.id != settings.tg_admin_id:
-        await callback.answer("Только для админа", show_alert=True)
-        return
+    # Разрешено любому в private chat. Захват требует осмысленного callback_data,
+    # который генерируется только из реальных Tribute-постов в auto_capture_tribute.
     parts = callback.data.split(":")
     if len(parts) != 3:
         await callback.answer("Битый callback", show_alert=True)
@@ -333,6 +332,20 @@ async def cmd_help(message: Message):
         "/stop — отписаться от ежедневных сообщений\n"
         "/help — эта справка",
         parse_mode="Markdown",
+    )
+
+
+@router.message(F.via_bot.username == "tribute", F.chat.type == "private")
+async def auto_capture_tribute(message: Message):
+    """Tribute mini-app share присылает inline-сообщение с via_bot=@tribute.
+    Сразу показываем кнопки для привязки к product_code."""
+    await message.reply(
+        f"📥 Пост от @tribute получен (msg_id={message.message_id}).\n\nКакой это продукт?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✦ Манифест 7", callback_data=f"cap:manifest_7:{message.message_id}")],
+            [InlineKeyboardButton(text="✦ Клуб «Манифест»", callback_data=f"cap:manifest_club:{message.message_id}")],
+            [InlineKeyboardButton(text="✦ Манифест 1:1", callback_data=f"cap:manifest_1on1:{message.message_id}")],
+        ]),
     )
 
 
