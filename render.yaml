@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: kydaidy-bot
+    runtime: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: PORT
+        value: "8080"
+      - key: WEBHOOK_PATH
+        value: "/tg-webhook"
+      - key: WEBHOOK_BASE_URL
+        value: "https://kydaidy-bot.onrender.com"
+      - key: DATABASE_URL
+        value: "sqlite+aiosqlite:///./kydaidy.db"
+      - key: TG_CHANNEL_ID
+        value: "@kydaidy"
+      - key: MANIFEST_7_PRICE
+        value: "1990"
+      - key: MANIFEST_CLUB_PRICE
+        value: "990"
+      - key: MANIFEST_PLUS_PRICE
+        value: "4990"
+      - key: ONE_ON_ONE_PRICE
+        value: "7000"
+      # Эти переменные нужно ввести в Render UI вручную (sync: false):
+      - key: TG_BOT_TOKEN
+        sync: false
+      - key: TG_ADMIN_ID
+        sync: false
+      - key: TRIBUTE_API_KEY
+        sync: false
+      - key: TRIBUTE_WEBHOOK_SECRET
+        sync: false
+      - key: TALLY_WEBHOOK_SECRET
+        sync: false
