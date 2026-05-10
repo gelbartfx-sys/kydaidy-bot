@@ -116,9 +116,11 @@ async def _send_povorot_result(message: Message, povorot: int):
     # 4. Аудио-приветствие (если файл существует)
     audio_path = Path(__file__).parent / AUDIO_FILES[povorot]
     if audio_path.exists():
-        await message.answer_voice(
+        await message.answer_audio(
             FSInputFile(audio_path),
-            caption="60 секунд от меня — про твой поворот",
+            title=f"Карта перепутья — Поворот {povorot}",
+            performer="Алёна Kyda Idy",
+            caption="Минута от меня — про твой поворот.",
         )
     else:
         logger.warning(f"Аудио не найдено: {audio_path}")
