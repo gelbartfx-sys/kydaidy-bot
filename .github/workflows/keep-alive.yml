@@ -1,0 +1,25 @@
+name: keep-alive
+
+on:
+  schedule:
+    - cron: '*/14 * * * *'  # каждые 14 мин (Render free засыпает после 15 мин неактивности)
+  workflow_dispatch:        # ручной запуск из UI
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping /health
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -fsS -o /dev/null -w "%{http_code}" https://kydaidy-bot.onrender.com/health || true)
+            if [ "$code" = "200" ]; then
+              echo "OK on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $code, retrying in 10s"
+            sleep 10
+          done
+          echo "Bot did not respond 200 after 3 attempts"
+          exit 1
