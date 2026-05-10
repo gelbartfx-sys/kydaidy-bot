@@ -74,22 +74,17 @@ async def tribute_webhook(request: web.Request) -> web.Response:
     try:
         body = await request.read()
 
-        # Diagnostic logging: capture headers + truncated body so we can see the
-        # exact signature header name, algorithm, and payload format Tribute uses.
-        # Signature validation below remains strict (returns 403 on mismatch).
-        all_headers = {k: v for k, v in request.headers.items()}
-        body_text = body.decode("utf-8", errors="replace")[:2000]
-        logger.warning(
-            f"TRIBUTE WEBHOOK INCOMING | headers={json.dumps(all_headers, ensure_ascii=False)} "
-            f"| body={body_text}"
-        )
-
-        signature = request.headers.get("X-Tribute-Signature", "")
+        signature = request.headers.get("Trbt-Signature", "")
         if not _verify_tribute_signature(body, signature):
+            logger.warning(f"Tribute webhook: bad signature, body={body[:200]!r}")
             return web.Response(status=403, text="invalid signature")
 
         data = json.loads(body)
         event_type = data.get("event")
+
+        if event_type is None:
+            logger.info(f"Tribute test webhook OK: {body[:200]!r}")
+            return web.Response(status=200, text="ok")
 
         tg_id = int(data.get("user_telegram_id", 0))
         product_code = data.get("product_code")
