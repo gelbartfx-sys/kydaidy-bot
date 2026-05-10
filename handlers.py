@@ -8,7 +8,10 @@ from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 from config import settings
-from database import upsert_user, get_user, start_nurture, stop_nurture, get_user_purchases
+from database import (
+    upsert_user, get_user, start_nurture, stop_nurture, get_user_purchases,
+    set_tribute_post, get_tribute_post,
+)
 from content_data import (
     POVOROT_RESULTS,
     POVOROT_NAMES,
@@ -17,8 +20,11 @@ from content_data import (
     AUDIO_FILES,
     WELCOME_NO_POVOROT,
     PRODUCTS_MENU,
+    PRODUCT_FALLBACKS,
     CLUB_DESCRIPTION,
 )
+
+VALID_PRODUCT_CODES = ("manifest_7", "manifest_club", "manifest_1on1")
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -145,13 +151,97 @@ async def cb_nurture_no(callback: CallbackQuery):
     await callback.answer()
 
 
+def _products_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✦ «Манифест 7» — 1 990 ₽", callback_data="buy:manifest_7")],
+            [InlineKeyboardButton(text="✦ Клуб «Манифест» — 990 ₽/мес", callback_data="buy:manifest_club")],
+            [InlineKeyboardButton(text="✦ «Манифест 1:1» — от 7 000 ₽", callback_data="buy:manifest_1on1")],
+            [InlineKeyboardButton(text="📍 Пройти карту перепутья (бесплатно)", callback_data="quiz")],
+        ]
+    )
+
+
 @router.callback_query(F.data == "products")
 @router.message(Command("products"))
 async def show_products(event):
     target = event.message if isinstance(event, CallbackQuery) else event
-    await target.answer(PRODUCTS_MENU, parse_mode="Markdown")
+    await target.answer(
+        "*Что доступно сейчас.*\n\nКуда идти — решаешь ты.\n\n— Алёна",
+        parse_mode="Markdown",
+        reply_markup=_products_menu_keyboard(),
+    )
     if isinstance(event, CallbackQuery):
         await event.answer()
+
+
+@router.callback_query(F.data.startswith("buy:"))
+async def show_one_product(callback: CallbackQuery):
+    code = callback.data.split(":", 1)[1]
+    if code not in VALID_PRODUCT_CODES:
+        await callback.answer("Неизвестный продукт", show_alert=True)
+        return
+    user_id = callback.from_user.id
+    bot = callback.bot
+
+    post = await get_tribute_post(code)
+    if post:
+        try:
+            await bot.copy_message(
+                chat_id=user_id,
+                from_chat_id=post["src_chat_id"],
+                message_id=post["src_message_id"],
+            )
+            await callback.answer()
+            return
+        except Exception as e:
+            logger.warning(f"copy_message failed for {code}: {e}")
+
+    # Fallback: текст со ссылкой-превью если пост ещё не захвачен через /capture
+    await bot.send_message(user_id, PRODUCT_FALLBACKS[code], parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.message(F.via_bot, F.from_user.id == settings.tg_admin_id)
+async def admin_capture_via_bot(message: Message):
+    """Ловит inline-сообщения через @tribute mini-app у админа в чате с ботом."""
+    via_username = message.via_bot.username if message.via_bot else None
+    if via_username != "tribute":
+        return  # не Tribute — игнорируем
+
+    await message.reply(
+        f"📥 Пост от @{via_username} получен (msg_id={message.message_id}).\n\nКакой это продукт?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Манифест 7", callback_data=f"cap:manifest_7:{message.message_id}")],
+            [InlineKeyboardButton(text="Клуб «Манифест»", callback_data=f"cap:manifest_club:{message.message_id}")],
+            [InlineKeyboardButton(text="Манифест 1:1", callback_data=f"cap:manifest_1on1:{message.message_id}")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("cap:"))
+async def capture_callback(callback: CallbackQuery):
+    if callback.from_user.id != settings.tg_admin_id:
+        await callback.answer("Только для админа", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Битый callback", show_alert=True)
+        return
+    _, code, msg_id_str = parts
+    if code not in VALID_PRODUCT_CODES:
+        await callback.answer("Неизвестный продукт", show_alert=True)
+        return
+    src_message_id = int(msg_id_str)
+    src_chat_id = callback.message.chat.id  # чат админа с ботом
+
+    await set_tribute_post(code, src_chat_id, src_message_id)
+    await callback.message.edit_text(
+        f"✅ Захвачено: *{code}*\nchat_id={src_chat_id}, message_id={src_message_id}\n\n"
+        f"Теперь /products будет копировать это сообщение пользователям.",
+        parse_mode="Markdown",
+    )
+    await callback.answer("Сохранено")
 
 
 @router.callback_query(F.data == "quiz")

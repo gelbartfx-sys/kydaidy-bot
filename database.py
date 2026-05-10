@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS messages_log (
     content TEXT,
     sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS tribute_posts (
+    product_code TEXT PRIMARY KEY,
+    src_chat_id INTEGER NOT NULL,
+    src_message_id INTEGER NOT NULL,
+    captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -153,3 +160,28 @@ async def get_user_purchases(tg_id: int):
     async with get_db() as db:
         cursor = await db.execute("SELECT * FROM purchases WHERE tg_id = ? ORDER BY created_at DESC", (tg_id,))
         return await cursor.fetchall()
+
+
+async def set_tribute_post(product_code: str, src_chat_id: int, src_message_id: int):
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO tribute_posts (product_code, src_chat_id, src_message_id, captured_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(product_code) DO UPDATE SET
+                src_chat_id = excluded.src_chat_id,
+                src_message_id = excluded.src_message_id,
+                captured_at = CURRENT_TIMESTAMP
+            """,
+            (product_code, src_chat_id, src_message_id),
+        )
+        await db.commit()
+
+
+async def get_tribute_post(product_code: str):
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM tribute_posts WHERE product_code = ?",
+            (product_code,),
+        )
+        return await cursor.fetchone()
