@@ -202,21 +202,65 @@ async def show_one_product(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.message(F.via_bot, F.from_user.id == settings.tg_admin_id)
-async def admin_capture_via_bot(message: Message):
-    """Ловит inline-сообщения через @tribute mini-app у админа в чате с ботом."""
-    via_username = message.via_bot.username if message.via_bot else None
-    if via_username != "tribute":
-        return  # не Tribute — игнорируем
+@router.message(Command("capture"))
+async def cmd_capture(message: Message, command: CommandObject):
+    """Захватывает Tribute-пост: reply'ом на пост от Tribute + /capture <code>.
 
+    Пример: ответить на сообщение от @tribute с текстом
+        /capture manifest_7
+    Бот сохранит chat_id+message_id того сообщения в БД tribute_posts.
+    """
+    if message.from_user.id != settings.tg_admin_id:
+        return  # silent ignore for non-admins
+
+    code = (command.args or "").strip()
+    if code not in VALID_PRODUCT_CODES:
+        await message.reply(
+            f"Использование: reply на пост от @tribute + /capture <code>\n"
+            f"Допустимые коды: {', '.join(VALID_PRODUCT_CODES)}"
+        )
+        return
+
+    target = message.reply_to_message
+    if not target:
+        await message.reply("Команда работает только как reply на пост от @tribute.")
+        return
+
+    src_chat_id = target.chat.id
+    src_message_id = target.message_id
+    await set_tribute_post(code, src_chat_id, src_message_id)
     await message.reply(
-        f"📥 Пост от @{via_username} получен (msg_id={message.message_id}).\n\nКакой это продукт?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Манифест 7", callback_data=f"cap:manifest_7:{message.message_id}")],
-            [InlineKeyboardButton(text="Клуб «Манифест»", callback_data=f"cap:manifest_club:{message.message_id}")],
-            [InlineKeyboardButton(text="Манифест 1:1", callback_data=f"cap:manifest_1on1:{message.message_id}")],
-        ]),
+        f"✅ Захвачено: *{code}*\n"
+        f"chat_id={src_chat_id}, message_id={src_message_id}\n\n"
+        f"Теперь /products будет копировать это сообщение пользователям.",
+        parse_mode="Markdown",
     )
+
+
+@router.message(F.from_user.id == settings.tg_admin_id, F.chat.type == "private")
+async def admin_inspect_message(message: Message):
+    """Логирует структуру любого сообщения от админа в личке —
+    чтобы поймать формат сообщений от Tribute и подсказать /capture.
+
+    Срабатывает только если ни один из выше зарегистрированных хэндлеров
+    (CommandStart, Command(quiz), Command(products), Command(capture), …) не подошёл.
+    """
+    via = message.via_bot.username if message.via_bot else None
+    fwd_origin_type = type(message.forward_origin).__name__ if message.forward_origin else None
+    has_photo = bool(message.photo)
+    has_buttons = bool(message.reply_markup)
+    logger.info(
+        f"admin msg {message.message_id} | via_bot=@{via} | fwd_origin={fwd_origin_type} | "
+        f"photo={has_photo} | buttons={has_buttons} | text={(message.text or message.caption or '')[:80]!r}"
+    )
+    # Если похоже на пост от Tribute (картинка + кнопки + caption) — подсказываем
+    if has_photo and (has_buttons or via == "tribute"):
+        await message.reply(
+            "📥 Похоже на пост от Tribute. Чтобы привязать его к продукту — "
+            "сделай *reply* на это сообщение и отправь:\n\n"
+            "`/capture manifest_7`   (или manifest_club / manifest_1on1)",
+            parse_mode="Markdown",
+        )
 
 
 @router.callback_query(F.data.startswith("cap:"))
