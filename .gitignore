@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+.DS_Store
+content/pdf/*.pdf
+content/audio/*.mp3
+!content/pdf/.gitkeep
+!content/audio/.gitkeep
