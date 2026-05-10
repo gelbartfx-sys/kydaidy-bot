@@ -73,8 +73,18 @@ async def tribute_webhook(request: web.Request) -> web.Response:
     """
     try:
         body = await request.read()
-        signature = request.headers.get("X-Tribute-Signature", "")
 
+        # Diagnostic logging: capture headers + truncated body so we can see the
+        # exact signature header name, algorithm, and payload format Tribute uses.
+        # Signature validation below remains strict (returns 403 on mismatch).
+        all_headers = {k: v for k, v in request.headers.items()}
+        body_text = body.decode("utf-8", errors="replace")[:2000]
+        logger.warning(
+            f"TRIBUTE WEBHOOK INCOMING | headers={json.dumps(all_headers, ensure_ascii=False)} "
+            f"| body={body_text}"
+        )
+
+        signature = request.headers.get("X-Tribute-Signature", "")
         if not _verify_tribute_signature(body, signature):
             return web.Response(status=403, text="invalid signature")
 
