@@ -27,6 +27,14 @@ from content_data import (
 
 VALID_PRODUCT_CODES = ("manifest_7", "manifest_club", "manifest_1on1")
 
+# Tribute purchase URLs — used as inline button on copied product cards.
+# copyMessage doesn't preserve the original inline keyboard, so we add it back.
+PRODUCT_BUY_URLS = {
+    "manifest_7":    ("Получить",    "https://web.tribute.tg/p/vKD"),
+    "manifest_club": ("Подписаться", "https://t.me/tribute/app?startapp=sULY"),
+    "manifest_1on1": ("Записаться",  "https://web.tribute.tg/p/vKG"),
+}
+
 logger = logging.getLogger(__name__)
 router = Router()
 
@@ -196,8 +204,16 @@ async def show_one_product(callback: CallbackQuery):
         src_chat, src_msg = PRODUCT_TRIBUTE_POSTS_DEFAULT[code]
 
     if src_chat and src_msg:
+        # Add inline button manually — copyMessage doesn't preserve original keyboard
+        label, url = PRODUCT_BUY_URLS[code]
+        kbd = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, url=url)]])
         try:
-            await bot.copy_message(chat_id=user_id, from_chat_id=src_chat, message_id=src_msg)
+            await bot.copy_message(
+                chat_id=user_id,
+                from_chat_id=src_chat,
+                message_id=src_msg,
+                reply_markup=kbd,
+            )
             await callback.answer()
             return
         except Exception as e:
