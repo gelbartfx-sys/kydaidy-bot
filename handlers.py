@@ -335,16 +335,51 @@ async def cmd_help(message: Message):
     )
 
 
+def _detect_product_code(caption: str | None) -> str | None:
+    """Определяет product_code по тексту/caption поста от Tribute.
+    Самое специфичное вперёд (1:1) → дальше клуб → манифест 7.
+    """
+    if not caption:
+        return None
+    text = caption.lower()
+    if "1:1" in text or "1 на 1" in text or "личная сессия" in text or "audio-call" in text:
+        return "manifest_1on1"
+    if "клуб" in text or "манифест дня" in text or "5-7 минут" in text or "5–7 минут" in text:
+        return "manifest_club"
+    if "манифест 7" in text or "воркбук" in text or "pdf" in text or "7 аудио" in text or "5 поворотов" in text:
+        return "manifest_7"
+    return None
+
+
 @router.message(F.via_bot.username == "tribute", F.chat.type == "private")
 async def auto_capture_tribute(message: Message):
     """Tribute mini-app share присылает inline-сообщение с via_bot=@tribute.
-    Сразу показываем кнопки для привязки к product_code."""
+    Пытаемся определить product_code по caption и сохранить автоматически.
+    Если не получилось — показываем кнопки.
+    """
+    caption = message.caption or message.text or ""
+    code = _detect_product_code(caption)
+    src_chat_id = message.chat.id
+    src_message_id = message.message_id
+
+    if code:
+        await set_tribute_post(code, src_chat_id, src_message_id)
+        await message.reply(
+            f"✅ Захвачено: *{code}*\n"
+            f"_(определено по тексту: «{caption[:60]}…»)_\n\n"
+            f"Теперь /products будет копировать этот пост пользователям.",
+            parse_mode="Markdown",
+        )
+        logger.info(f"auto-captured {code} chat={src_chat_id} msg={src_message_id}")
+        return
+
+    # Не определилось — кнопки
     await message.reply(
-        f"📥 Пост от @tribute получен (msg_id={message.message_id}).\n\nКакой это продукт?",
+        f"📥 Пост от @tribute получен. Какой это продукт?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✦ Манифест 7", callback_data=f"cap:manifest_7:{message.message_id}")],
-            [InlineKeyboardButton(text="✦ Клуб «Манифест»", callback_data=f"cap:manifest_club:{message.message_id}")],
-            [InlineKeyboardButton(text="✦ Манифест 1:1", callback_data=f"cap:manifest_1on1:{message.message_id}")],
+            [InlineKeyboardButton(text="✦ Манифест 7", callback_data=f"cap:manifest_7:{src_message_id}")],
+            [InlineKeyboardButton(text="✦ Клуб «Манифест»", callback_data=f"cap:manifest_club:{src_message_id}")],
+            [InlineKeyboardButton(text="✦ Манифест 1:1", callback_data=f"cap:manifest_1on1:{src_message_id}")],
         ]),
     )
 
