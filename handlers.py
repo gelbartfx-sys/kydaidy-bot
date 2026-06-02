@@ -21,6 +21,7 @@ from shadow_test import (
     ARCHETYPES, decode_distribution, winner_from_counts, encode_distribution,
 )
 from ai_quiz import generate_hero_image, generate_analysis_text
+from profile_image import render_profile
 import portrait_store
 
 # Публичные адреса для сборки ссылки на профиль.
@@ -164,10 +165,11 @@ async def on_photo(message: Message):
         await message.bot.download(message.photo[-1], destination=buf)
         photo_bytes = buf.getvalue()
 
-        image, text = await asyncio.gather(
-            generate_hero_image(photo_bytes, code, clean=True, api_key=settings.gemini_key),
-            generate_analysis_text(code, name=message.from_user.first_name, api_key=settings.gemini_key),
-        )
+        portrait = await generate_hero_image(
+            photo_bytes, code, clean=True, api_key=settings.gemini_key)
+        # рендер профиля — CPU-работа PIL, уводим из event loop
+        profile_png = await asyncio.to_thread(
+            render_profile, portrait, dist, message.from_user.first_name)
     except Exception as e:
         logger.exception(f"shadow generation failed for {tg_id} dist={dist}: {e}")
         await message.answer(
@@ -181,23 +183,26 @@ async def on_photo(message: Message):
         except Exception:
             pass
 
-    # Хостим портрет → собираем ссылку на полный профиль.
-    token = portrait_store.put(image)
+    # Хостим портрет → ссылка на веб-профиль (HD-скачивание + шеринг).
+    token = portrait_store.put(portrait)
     portrait_url = f"{BOT_PUBLIC_URL}/p/{token}"
     profile_url = f"{SITE_URL}/profile?d={dist}&p={quote(portrait_url, safe='')}"
     kbd = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌑 Открыть полный профиль", url=profile_url)],
+        [InlineKeyboardButton(text="🌑 Открыть в HD / поделиться", url=profile_url)],
     ])
 
     await message.answer_photo(
-        BufferedInputFile(image, filename=f"shadow_{code}.png"),
-        caption=f"🌑 Твоя Тень: {a['name']} — {a['tag']}",
+        BufferedInputFile(profile_png, filename="arhetip-profil.png"),
+        caption=f"🌑 Твой архетипический профиль · ведущая Тень: {a['name']}",
     )
-    await message.answer(text)
     await message.answer(
-        "Твой полный архетипический профиль — по кнопке ниже. "
-        "Там проценты, вторичные архетипы и разбор. Можно скачать картинкой и поделиться.",
+        "Сохрани картинку (зажми → «Сохранить») или открой в высоком качестве "
+        "и поделись — кнопка ниже. Отметишь @kydaidy 🤍",
         reply_markup=kbd,
+    )
+    await message.answer(
+        "Хочешь разобраться со своей Тенью глубже — посмотри, что у меня есть.",
+        reply_markup=_main_menu_keyboard(),
     )
     _pending_shadow.pop(tg_id, None)
 
