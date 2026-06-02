@@ -27,9 +27,13 @@ import portrait_store
 # Публичные адреса для сборки ссылки на профиль.
 BOT_PUBLIC_URL = "https://kydaidy-bot.onrender.com"
 SITE_URL = "https://kydaidy.com"
+
+# Аккаунты без лимита (могут генерить профиль сколько угодно). Username без @, lowercase.
+SHADOW_UNLIMITED = {"autocreater", "kyda_idy", "al_lazovsky"}
 from database import (
     upsert_user, get_user, start_nurture, stop_nurture, get_user_purchases,
     set_tribute_post, get_tribute_post,
+    has_generated_shadow, mark_shadow_generated,
 )
 from content_data import (
     POVOROT_RESULTS,
@@ -148,6 +152,16 @@ async def on_photo(message: Message):
         )
         return
 
+    uname = (message.from_user.username or "").lower()
+    if uname not in SHADOW_UNLIMITED and await has_generated_shadow(tg_id):
+        await message.answer(
+            "Бесплатный профиль Тени — один раз на человека, и ты его уже получала 🌑\n\n"
+            "Если хочешь пойти глубже по своей Тени — это уже «Манифест»: путь сквозь неё к себе.",
+            reply_markup=_products_menu_keyboard(),
+        )
+        _pending_shadow.pop(tg_id, None)
+        return
+
     if not settings.gemini_key:
         logger.error("gemini_key not configured — cannot generate shadow portrait")
         await message.answer("Сейчас рисунок недоступен. Напиши @kydaidy — поможем вручную.")
@@ -208,6 +222,8 @@ async def on_photo(message: Message):
         parse_mode="Markdown",
         reply_markup=_products_menu_keyboard(),
     )
+    if uname not in SHADOW_UNLIMITED:
+        await mark_shadow_generated(tg_id)
     _pending_shadow.pop(tg_id, None)
 
 

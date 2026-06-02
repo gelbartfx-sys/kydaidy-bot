@@ -57,6 +57,11 @@ CREATE TABLE IF NOT EXISTS tribute_posts (
     src_message_id INTEGER NOT NULL,
     captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS shadow_generations (
+    tg_id INTEGER PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -97,6 +102,20 @@ async def get_user(tg_id: int):
     async with get_db() as db:
         cursor = await db.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
         return await cursor.fetchone()
+
+
+async def has_generated_shadow(tg_id: int) -> bool:
+    async with get_db() as db:
+        cur = await db.execute("SELECT 1 FROM shadow_generations WHERE tg_id = ?", (tg_id,))
+        return await cur.fetchone() is not None
+
+
+async def mark_shadow_generated(tg_id: int):
+    async with get_db() as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO shadow_generations (tg_id) VALUES (?)", (tg_id,)
+        )
+        await db.commit()
 
 
 async def start_nurture(tg_id: int):
