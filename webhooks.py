@@ -118,7 +118,7 @@ _CHANNEL_BY_PRODUCT = {
 _BASE_TEXTS = {
     "manifest_7": (
         "✅ Спасибо. «Манифест 7» — твой.\n\n"
-        "Внутри канала: PDF-воркбук на 35 страниц + 7 аудио-практик от Алёны.\n\n"
+        "Внутри канала: PDF-воркбук на 80 страниц + 7 аудио-практик от Алёны.\n\n"
         "Прохождение в твоём темпе. Никаких обещаний быстрого результата."
     ),
     "manifest_club": (
@@ -195,9 +195,26 @@ async def _grant_access(bot: Bot, tg_id: int, product_code: str):
             pass
 
 
+async def portrait_route(request: web.Request) -> web.Response:
+    """Отдаёт сгенерированный портрет Тени странице профиля (геро-слот)."""
+    from portrait_store import get as get_portrait
+    data = get_portrait(request.match_info.get("token", ""))
+    if not data:
+        return web.Response(status=404, text="not found")
+    return web.Response(
+        body=data,
+        content_type="image/png",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
 def setup_webhooks(app: web.Application, bot: Bot):
     app["bot"] = bot
     app.router.add_post("/webhook/tally", tally_webhook)
     app.router.add_post("/webhook/tribute", tribute_webhook)
+    app.router.add_get("/p/{token}", portrait_route)
     app.router.add_get("/", lambda r: web.Response(text="kydaidy bot is running"))
     app.router.add_get("/health", lambda r: web.Response(text="ok"))

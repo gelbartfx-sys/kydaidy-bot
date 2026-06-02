@@ -287,12 +287,48 @@ QUESTIONS = [
 ]
 
 
+# Канонический порядок для кодирования распределения в deeplink (10 позиций).
+ORDER = ["W", "Q", "H", "M", "F", "MR", "R", "O", "D", "C"]
+
+
 def score(answers: list[str]) -> str:
     """answers — список кодов архетипов (по одному на вопрос). Возвращает код-победитель."""
     counts = {code: 0 for code in ARCHETYPES}
     for a in answers:
         if a in counts:
             counts[a] += 1
-    best = max(counts.values())
-    winners = [c for c in _TIEBREAK if counts[c] == best]
+    return winner_from_counts(counts)
+
+
+def winner_from_counts(counts: dict) -> str:
+    """Код-победитель из словаря {код: количество} с детерминированным tie-break."""
+    best = max((counts.get(c, 0) for c in ARCHETYPES), default=0)
+    winners = [c for c in _TIEBREAK if counts.get(c, 0) == best]
     return winners[0] if winners else "W"
+
+
+def decode_distribution(s: str) -> dict | None:
+    """Декодирует строку deeplink (10 символов, по 1 на архетип в ORDER) в {код: count}.
+
+    Символ '0'-'9' → 0-9, 'a' → 10. Возвращает None при неверном формате.
+    """
+    if not s or len(s) != len(ORDER):
+        return None
+    counts = {}
+    for ch, code in zip(s, ORDER):
+        if ch == "a":
+            counts[code] = 10
+        elif ch.isdigit():
+            counts[code] = int(ch)
+        else:
+            return None
+    return counts
+
+
+def encode_distribution(counts: dict) -> str:
+    """Кодирует {код: count} в строку deeplink (для тестов/симметрии с фронтом)."""
+    out = []
+    for code in ORDER:
+        n = counts.get(code, 0)
+        out.append("a" if n >= 10 else str(n))
+    return "".join(out)

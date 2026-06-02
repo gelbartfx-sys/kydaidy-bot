@@ -14,9 +14,18 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
 )
 
+from urllib.parse import quote
+
 from config import settings
-from shadow_test import ARCHETYPES
+from shadow_test import (
+    ARCHETYPES, decode_distribution, winner_from_counts, encode_distribution,
+)
 from ai_quiz import generate_hero_image, generate_analysis_text
+import portrait_store
+
+# Публичные адреса для сборки ссылки на профиль.
+BOT_PUBLIC_URL = "https://kydaidy-bot.onrender.com"
+SITE_URL = "https://kydaidy.com"
 from database import (
     upsert_user, get_user, start_nurture, stop_nurture, get_user_purchases,
     set_tribute_post, get_tribute_post,
@@ -47,7 +56,7 @@ PRODUCT_BUY_URLS = {
 logger = logging.getLogger(__name__)
 router = Router()
 
-# tg_id -> код архетипа, по которому ждём фото для портрета Тени.
+# tg_id -> строка-распределение (10 символов), по которой ждём фото для профиля Тени.
 # In-memory: генерация идёт сразу после фото в той же сессии; переживать рестарт
 # Render free не требуется (если потеряется — бот мягко попросит пройти тест заново).
 _pending_shadow: dict[int, str] = {}
@@ -78,12 +87,19 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
     args = command.args or ""
     user = message.from_user
 
-    # Тест тёмных архетипов: /start shadow_<code> → просим фото для портрета Тени.
+    # Тест тёмных архетипов с полным распределением: /start s_<10 символов>.
+    if args.startswith("s_"):
+        if decode_distribution(args[2:]):
+            await upsert_user(user.id, user.username, user.first_name)
+            await _prompt_shadow_photo(message, args[2:])
+            return
+
+    # Совместимость: /start shadow_<code> → распределение «весь вес на этот код».
     if args.startswith("shadow_"):
         code = args[len("shadow_"):].upper()
         if code in ARCHETYPES:
             await upsert_user(user.id, user.username, user.first_name)
-            await _prompt_shadow_photo(message, code)
+            await _prompt_shadow_photo(message, encode_distribution({code: 10}))
             return
 
     povorot = None
@@ -103,16 +119,17 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         await message.answer(WELCOME_NO_POVOROT, reply_markup=_main_menu_keyboard())
 
 
-async def _prompt_shadow_photo(message: Message, code: str):
-    """После теста архетипов — показать результат и попросить фото."""
+async def _prompt_shadow_photo(message: Message, dist: str):
+    """После теста архетипов — показать ведущий архетип и попросить фото."""
+    code = winner_from_counts(decode_distribution(dist))
     a = ARCHETYPES[code]
-    _pending_shadow[message.from_user.id] = code
+    _pending_shadow[message.from_user.id] = dist
     await message.answer(
-        f"🌑 Твоя активная Тень — *{a['name']}* _({a['too']})_.\n\n"
+        f"🌑 Твоя ведущая Тень — *{a['name']}* _({a['too']})_.\n\n"
         f"{a['tag']}\n\n"
-        "Хочешь увидеть СЕБЯ в образе этого архетипа?\n"
-        "Пришли мне *одно своё фото* (лицо хорошо видно) — нарисую тебя как твою Тень "
-        "акварелью и пришлю персональный разбор.\n\n"
+        "Хочешь свой полный *архетипический профиль* — с портретом в образе этой Тени?\n"
+        "Пришли мне *одно своё фото* (лицо хорошо видно) — нарисую тебя акварелью и "
+        "соберу персональный профиль.\n\n"
         "_Фото нужно только для рисунка, я его не храню._",
         parse_mode="Markdown",
     )
@@ -120,10 +137,10 @@ async def _prompt_shadow_photo(message: Message, code: str):
 
 @router.message(F.photo)
 async def on_photo(message: Message):
-    """Пользователь прислал фото после теста архетипов → генерим портрет Тени + разбор."""
+    """Фото после теста → clean-портрет Тени + разбор + ссылка на полный профиль."""
     tg_id = message.from_user.id
-    code = _pending_shadow.get(tg_id)
-    if not code:
+    dist = _pending_shadow.get(tg_id)
+    if not dist:
         await message.answer(
             "Спасибо за фото 🙏 Сначала пройди тест «Какая Тень в тебе активна» — "
             "и пришли фото следом: https://kydaidy.com/shadow"
@@ -135,6 +152,7 @@ async def on_photo(message: Message):
         await message.answer("Сейчас рисунок недоступен. Напиши @kydaidy — поможем вручную.")
         return
 
+    code = winner_from_counts(decode_distribution(dist))
     a = ARCHETYPES[code]
     status = await message.answer(
         f"Рисую твою Тень — *{a['name']}*… Это займёт около минуты. Не закрывай чат 🕯️",
@@ -147,11 +165,11 @@ async def on_photo(message: Message):
         photo_bytes = buf.getvalue()
 
         image, text = await asyncio.gather(
-            generate_hero_image(photo_bytes, code, api_key=settings.gemini_key),
+            generate_hero_image(photo_bytes, code, clean=True, api_key=settings.gemini_key),
             generate_analysis_text(code, name=message.from_user.first_name, api_key=settings.gemini_key),
         )
     except Exception as e:
-        logger.exception(f"shadow generation failed for {tg_id} code={code}: {e}")
+        logger.exception(f"shadow generation failed for {tg_id} dist={dist}: {e}")
         await message.answer(
             "Что-то пошло не так с рисунком. Попробуй прислать другое фото — "
             "или напиши @kydaidy."
@@ -163,15 +181,23 @@ async def on_photo(message: Message):
         except Exception:
             pass
 
+    # Хостим портрет → собираем ссылку на полный профиль.
+    token = portrait_store.put(image)
+    portrait_url = f"{BOT_PUBLIC_URL}/p/{token}"
+    profile_url = f"{SITE_URL}/profile?d={dist}&p={quote(portrait_url, safe='')}"
+    kbd = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌑 Открыть полный профиль", url=profile_url)],
+    ])
+
     await message.answer_photo(
         BufferedInputFile(image, filename=f"shadow_{code}.png"),
         caption=f"🌑 Твоя Тень: {a['name']} — {a['tag']}",
     )
     await message.answer(text)
     await message.answer(
-        "Это твоя Тень — не приговор, а вытесненная сила.\n\n"
-        "Если захочешь разобраться глубже — посмотри, что у меня есть.",
-        reply_markup=_main_menu_keyboard(),
+        "Твой полный архетипический профиль — по кнопке ниже. "
+        "Там проценты, вторичные архетипы и разбор. Можно скачать картинкой и поделиться.",
+        reply_markup=kbd,
     )
     _pending_shadow.pop(tg_id, None)
 

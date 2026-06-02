@@ -97,12 +97,11 @@ async def generate_analysis_text(code: str, name: str | None = None,
     return text
 
 
-def _image_prompt(code: str) -> str:
+def _image_prompt(code: str, clean: bool = False) -> str:
     a = ARCHETYPES[code]
-    return (
+    base = (
         "Image 1 is a reference photo of a real woman. Create a SINGLE vertical "
-        "illustration (portrait, ~2:3) — a moody keepsake «портрет твоей Тени» "
-        "(portrait of her Shadow) card with HER as the archetype.\n\n"
+        "illustration (portrait, ~2:3) with HER as the archetype.\n\n"
         "STYLE: atmospheric Poetcore watercolour on dark-toned textured paper. Deep, "
         "moody, earthy palette — charcoal, deep forest green, oxblood/burgundy, muted "
         "gold candle-light, smoky shadows. Hand-painted, soft bleeding edges, visible "
@@ -115,6 +114,16 @@ def _image_prompt(code: str) -> str:
         "glamour or beauty shot.\n\n"
         f"ARCHETYPE — «{a['name']}» ({a['too']}): {a['scene']}. "
         f"Emotional mood: {a['mood']}.\n\n"
+    )
+    if clean:
+        return base + (
+            "IMPORTANT: render ONLY the painted illustration — a clean artwork that fills "
+            "the whole frame edge to edge. ABSOLUTELY NO text, NO letters, NO words, NO "
+            "captions, NO signature, NO frame or border, NO card layout. Just the "
+            "watercolour scene of the heroine. No writing of any kind anywhere."
+        )
+    return base + (
+        "This is a keepsake «портрет твоей Тени» card.\n"
         "TEXT rendered ON the card — clean, correct Russian Cyrillic only, elegant, no "
         "spelling errors, NO latin letters, NO gibberish. EXACTLY these four elements, "
         "each appearing ONCE, never duplicated:\n"
@@ -130,12 +139,12 @@ def _image_prompt(code: str) -> str:
     )
 
 
-async def generate_hero_image(photo_bytes: bytes, code: str,
+async def generate_hero_image(photo_bytes: bytes, code: str, clean: bool = False,
                               mime: str = "image/jpeg", api_key: str | None = None) -> bytes:
     """«Портрет Тени» по фото пользователя (Nano Banana). Возвращает image bytes."""
     parts = [
         {"inlineData": {"mimeType": mime, "data": base64.b64encode(photo_bytes).decode()}},
-        {"text": _image_prompt(code)},
+        {"text": _image_prompt(code, clean=clean)},
     ]
     payload = {
         "contents": [{"parts": parts}],
