@@ -1,13 +1,22 @@
 """Обработчики команд бота."""
 
+from __future__ import annotations
+
+import io
+import asyncio
 import logging
 from pathlib import Path
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart, CommandObject
-from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import (
+    Message, FSInputFile, BufferedInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
+)
 
 from config import settings
+from shadow_test import ARCHETYPES
+from ai_quiz import generate_hero_image, generate_analysis_text
 from database import (
     upsert_user, get_user, start_nurture, stop_nurture, get_user_purchases,
     set_tribute_post, get_tribute_post,
@@ -38,6 +47,11 @@ PRODUCT_BUY_URLS = {
 logger = logging.getLogger(__name__)
 router = Router()
 
+# tg_id -> код архетипа, по которому ждём фото для портрета Тени.
+# In-memory: генерация идёт сразу после фото в той же сессии; переживать рестарт
+# Render free не требуется (если потеряется — бот мягко попросит пройти тест заново).
+_pending_shadow: dict[int, str] = {}
+
 
 def _nurture_optin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -60,8 +74,17 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
 
 @router.message(CommandStart(deep_link=True))
 async def cmd_start_with_deeplink(message: Message, command: CommandObject):
-    """Старт с UTM-параметром: /start povorot3 → выдать карту по повороту 3."""
+    """Старт с deeplink: /start povorot3 → карта; /start shadow_W → тест архетипов."""
     args = command.args or ""
+    user = message.from_user
+
+    # Тест тёмных архетипов: /start shadow_<code> → просим фото для портрета Тени.
+    if args.startswith("shadow_"):
+        code = args[len("shadow_"):].upper()
+        if code in ARCHETYPES:
+            await upsert_user(user.id, user.username, user.first_name)
+            await _prompt_shadow_photo(message, code)
+            return
 
     povorot = None
     if args.startswith("povorot"):
@@ -72,13 +95,85 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         except ValueError:
             povorot = None
 
-    user = message.from_user
     await upsert_user(user.id, user.username, user.first_name, povorot)
 
     if povorot:
         await _send_povorot_result(message, povorot)
     else:
         await message.answer(WELCOME_NO_POVOROT, reply_markup=_main_menu_keyboard())
+
+
+async def _prompt_shadow_photo(message: Message, code: str):
+    """После теста архетипов — показать результат и попросить фото."""
+    a = ARCHETYPES[code]
+    _pending_shadow[message.from_user.id] = code
+    await message.answer(
+        f"🌑 Твоя активная Тень — *{a['name']}* _({a['too']})_.\n\n"
+        f"{a['tag']}\n\n"
+        "Хочешь увидеть СЕБЯ в образе этого архетипа?\n"
+        "Пришли мне *одно своё фото* (лицо хорошо видно) — нарисую тебя как твою Тень "
+        "акварелью и пришлю персональный разбор.\n\n"
+        "_Фото нужно только для рисунка, я его не храню._",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(F.photo)
+async def on_photo(message: Message):
+    """Пользователь прислал фото после теста архетипов → генерим портрет Тени + разбор."""
+    tg_id = message.from_user.id
+    code = _pending_shadow.get(tg_id)
+    if not code:
+        await message.answer(
+            "Спасибо за фото 🙏 Сначала пройди тест «Какая Тень в тебе активна» — "
+            "и пришли фото следом: https://kydaidy.com/shadow"
+        )
+        return
+
+    if not settings.gemini_key:
+        logger.error("gemini_key not configured — cannot generate shadow portrait")
+        await message.answer("Сейчас рисунок недоступен. Напиши @kydaidy — поможем вручную.")
+        return
+
+    a = ARCHETYPES[code]
+    status = await message.answer(
+        f"Рисую твою Тень — *{a['name']}*… Это займёт около минуты. Не закрывай чат 🕯️",
+        parse_mode="Markdown",
+    )
+
+    try:
+        buf = io.BytesIO()
+        await message.bot.download(message.photo[-1], destination=buf)
+        photo_bytes = buf.getvalue()
+
+        image, text = await asyncio.gather(
+            generate_hero_image(photo_bytes, code, api_key=settings.gemini_key),
+            generate_analysis_text(code, name=message.from_user.first_name, api_key=settings.gemini_key),
+        )
+    except Exception as e:
+        logger.exception(f"shadow generation failed for {tg_id} code={code}: {e}")
+        await message.answer(
+            "Что-то пошло не так с рисунком. Попробуй прислать другое фото — "
+            "или напиши @kydaidy."
+        )
+        return
+    finally:
+        try:
+            await status.delete()
+        except Exception:
+            pass
+
+    await message.answer_photo(
+        BufferedInputFile(image, filename=f"shadow_{code}.png"),
+        caption=f"🌑 Твоя Тень: {a['name']} — {a['tag']}",
+    )
+    await message.answer(text)
+    await message.answer(
+        "Это твоя Тень — не приговор, а вытесненная сила.\n\n"
+        "Если захочешь разобраться глубже — посмотри, что у меня есть.",
+        reply_markup=_main_menu_keyboard(),
+    )
+    _pending_shadow.pop(tg_id, None)
 
 
 @router.message(CommandStart())

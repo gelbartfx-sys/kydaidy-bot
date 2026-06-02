@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     tribute_webhook_secret: str = ""
     tally_webhook_secret: str = ""
 
+    # Gemini (Nano Banana) — генерация портрета Тени + разбора в тесте архетипов.
+    gemini_key: str = ""
+
     webhook_base_url: str = ""
     webhook_path: str = "/tg-webhook"
     port: int = 8080

@@ -1,5 +1,7 @@
 """SQLite база на aiosqlite. Минимум для MVP."""
 
+from __future__ import annotations
+
 import aiosqlite
 from contextlib import asynccontextmanager
 from datetime import datetime
