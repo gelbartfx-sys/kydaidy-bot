@@ -28,8 +28,15 @@ import portrait_store
 BOT_PUBLIC_URL = "https://kydaidy-bot.onrender.com"
 SITE_URL = "https://kydaidy.com"
 
-# Аккаунты без лимита (могут генерить профиль сколько угодно). Username без @, lowercase.
+# Аккаунты без лимита (могут генерить профиль сколько угодно).
+# По username (без @, lowercase) И по tg_id — username ненадёжен (может быть скрыт/изменён).
 SHADOW_UNLIMITED = {"autocreater", "kyda_idy", "al_lazovsky"}
+SHADOW_UNLIMITED_IDS = {6271776494}  # admin (Кай); id Алёны/2-го добавим через /whoami
+
+
+def _is_unlimited(user) -> bool:
+    uname = (user.username or "").lower().lstrip("@")
+    return uname in SHADOW_UNLIMITED or user.id in SHADOW_UNLIMITED_IDS
 from database import (
     upsert_user, get_user, start_nurture, stop_nurture, get_user_purchases,
     set_tribute_post, get_tribute_post,
@@ -152,8 +159,7 @@ async def on_photo(message: Message):
         )
         return
 
-    uname = (message.from_user.username or "").lower()
-    if uname not in SHADOW_UNLIMITED and await has_generated_shadow(tg_id):
+    if not _is_unlimited(message.from_user) and await has_generated_shadow(tg_id):
         await message.answer(
             "Бесплатный профиль Тени — один раз на человека, и ты его уже получала 🌑\n\n"
             "Если хочешь пойти глубже по своей Тени — это уже «Манифест»: путь сквозь неё к себе.",
@@ -222,7 +228,7 @@ async def on_photo(message: Message):
         parse_mode="Markdown",
         reply_markup=_products_menu_keyboard(),
     )
-    if uname not in SHADOW_UNLIMITED:
+    if not _is_unlimited(message.from_user):
         await mark_shadow_generated(tg_id)
     _pending_shadow.pop(tg_id, None)
 
@@ -486,6 +492,16 @@ async def show_club(message: Message):
 async def cmd_stop_nurture(message: Message):
     await stop_nurture(message.from_user.id)
     await message.answer("Поняла. Не буду писать ежедневно.\n\nКанал @kydaidy всегда открыт.")
+
+
+@router.message(Command("whoami"))
+async def cmd_whoami(message: Message):
+    u = message.from_user
+    unlimited = "да ✅" if _is_unlimited(u) else "нет (лимит 1)"
+    await message.answer(
+        f"id: `{u.id}`\nusername: @{u.username or '—'}\nбезлимит профиля: {unlimited}",
+        parse_mode="Markdown",
+    )
 
 
 @router.message(Command("help"))
