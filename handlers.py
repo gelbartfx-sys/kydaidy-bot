@@ -298,7 +298,6 @@ def _products_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✦ «Манифест 7» — 1 990 ₽", callback_data="buy:manifest_7")],
             [InlineKeyboardButton(text="✦ Клуб «Манифест» — 990 ₽/мес", callback_data="buy:manifest_club")],
             [InlineKeyboardButton(text="✦ «Манифест 1:1» — от 7 000 ₽", callback_data="buy:manifest_1on1")],
-            [InlineKeyboardButton(text="🌑 Узнать свою Тень (бесплатно)", callback_data="quiz")],
         ]
     )
 
@@ -478,7 +477,7 @@ async def cmd_help(message: Message):
     await message.answer(
         "*Команды бота*\n\n"
         "/start — главное меню\n"
-        "/quiz — пройти карту перепутья\n"
+        "/quiz — узнать свою Тень (тест)\n"
         "/products — что доступно\n"
         "/cabinet — мой кабинет\n"
         "/club — про Клуб «Манифест»\n"
