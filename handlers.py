@@ -75,7 +75,7 @@ def _nurture_optin_keyboard() -> InlineKeyboardMarkup:
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📍 Пройти карту", callback_data="quiz")],
+            [InlineKeyboardButton(text="🌑 Узнать свою Тень", callback_data="quiz")],
             [InlineKeyboardButton(text="🛍️ Что доступно", callback_data="products")],
             [InlineKeyboardButton(text="👤 Мой кабинет", callback_data="cabinet")],
         ]
@@ -201,8 +201,12 @@ async def on_photo(message: Message):
         reply_markup=kbd,
     )
     await message.answer(
-        "Хочешь разобраться со своей Тенью глубже — посмотри, что у меня есть.",
-        reply_markup=_main_menu_keyboard(),
+        "Твой архетип — это *Тень*: где ты защищаешься сейчас, в какой маске застряла.\n\n"
+        "Путь сквозь неё — *карта 5 поворотов*. Это «Манифест»: воркбук, аудио-практики, клуб — "
+        "дорога от защиты обратно к себе.\n\n"
+        "Если захочешь пройти этот путь — вот с чего начать ↓",
+        parse_mode="Markdown",
+        reply_markup=_products_menu_keyboard(),
     )
     _pending_shadow.pop(tg_id, None)
 
@@ -294,7 +298,7 @@ def _products_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✦ «Манифест 7» — 1 990 ₽", callback_data="buy:manifest_7")],
             [InlineKeyboardButton(text="✦ Клуб «Манифест» — 990 ₽/мес", callback_data="buy:manifest_club")],
             [InlineKeyboardButton(text="✦ «Манифест 1:1» — от 7 000 ₽", callback_data="buy:manifest_1on1")],
-            [InlineKeyboardButton(text="📍 Пройти карту перепутья (бесплатно)", callback_data="quiz")],
+            [InlineKeyboardButton(text="🌑 Узнать свою Тень (бесплатно)", callback_data="quiz")],
         ]
     )
 
@@ -421,9 +425,10 @@ async def capture_callback(callback: CallbackQuery):
 async def show_quiz(event):
     target = event.message if isinstance(event, CallbackQuery) else event
     await target.answer(
-        "Карта перепутья — диагностический квиз. 10 вопросов, 5 минут.\n\n"
-        "Пройди здесь: https://tally.so/r/YOUR_QUIZ_ID\n\n"
-        "После прохождения автоматически вернёшься сюда с твоей картой."
+        "«Какая Тень в тебе активна» — тест из 10 тёмных женских архетипов. "
+        "10 вопросов, 5 минут.\n\n"
+        "Пройди здесь: https://kydaidy.com/shadow\n\n"
+        "В конце пришли мне сюда своё фото — соберу твой архетипический профиль. Бесплатно."
     )
     if isinstance(event, CallbackQuery):
         await event.answer()
