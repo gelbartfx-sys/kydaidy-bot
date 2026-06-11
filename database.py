@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT,
     first_name TEXT,
     povorot INTEGER,
+    shadow_dist TEXT,
     quiz_completed_at TIMESTAMP,
     nurture_day INTEGER DEFAULT 0,
     nurture_active INTEGER DEFAULT 0,
@@ -85,6 +86,15 @@ CREATE TABLE IF NOT EXISTS tribute_posts (
 CREATE TABLE IF NOT EXISTS shadow_generations (
     tg_id INTEGER PRIMARY KEY,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS manifest7_guide (
+    tg_id INTEGER,
+    practice INTEGER,
+    step INTEGER DEFAULT 0,
+    completed_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    PRIMARY KEY (tg_id, practice)
 );
 """
 
@@ -184,6 +194,10 @@ async def get_user(tg_id: int):
     return await _exec("SELECT * FROM users WHERE tg_id = ?", (tg_id,), fetch="one")
 
 
+async def save_shadow_dist(tg_id: int, dist: str):
+    await _exec("UPDATE users SET shadow_dist = ? WHERE tg_id = ?", (dist, tg_id))
+
+
 async def has_generated_shadow(tg_id: int) -> bool:
     row = await _exec("SELECT 1 FROM shadow_generations WHERE tg_id = ?", (tg_id,), fetch="one")
     return row is not None
@@ -248,6 +262,46 @@ async def get_user_purchases(tg_id: int):
         "SELECT * FROM purchases WHERE tg_id = ? ORDER BY created_at DESC",
         (tg_id,),
         fetch="all",
+    )
+
+
+# ── AI-проводник «Манифест 7» (прогресс практик) ─────────────────────────────
+
+async def guide_get_all(tg_id: int):
+    return await _exec(
+        "SELECT * FROM manifest7_guide WHERE tg_id = ?", (tg_id,), fetch="all")
+
+
+async def guide_get(tg_id: int, practice: int):
+    return await _exec(
+        "SELECT * FROM manifest7_guide WHERE tg_id = ? AND practice = ?",
+        (tg_id, practice), fetch="one")
+
+
+async def guide_set_step(tg_id: int, practice: int, step: int):
+    await _exec(
+        """
+        INSERT INTO manifest7_guide (tg_id, practice, step, completed_at, updated_at)
+        VALUES (?, ?, ?, NULL, CURRENT_TIMESTAMP)
+        ON CONFLICT(tg_id, practice) DO UPDATE SET
+            step = excluded.step,
+            completed_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (tg_id, practice, step),
+    )
+
+
+async def guide_complete(tg_id: int, practice: int):
+    await _exec(
+        """
+        INSERT INTO manifest7_guide (tg_id, practice, step, completed_at, updated_at)
+        VALUES (?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(tg_id, practice) DO UPDATE SET
+            completed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (tg_id, practice),
     )
 
 

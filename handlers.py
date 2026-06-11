@@ -40,7 +40,7 @@ def _is_unlimited(user) -> bool:
 from database import (
     upsert_user, get_user, start_nurture, stop_nurture, get_user_purchases,
     set_tribute_post, get_tribute_post,
-    has_generated_shadow, mark_shadow_generated,
+    has_generated_shadow, mark_shadow_generated, save_shadow_dist,
 )
 from content_data import (
     POVOROT_RESULTS,
@@ -230,6 +230,11 @@ async def on_photo(message: Message):
     )
     if not _is_unlimited(message.from_user):
         await mark_shadow_generated(tg_id)
+    # Сохраняем распределение Тени — AI-проводник практик адаптируется под него.
+    try:
+        await save_shadow_dist(tg_id, dist)
+    except Exception:
+        logger.warning(f"save_shadow_dist failed for {tg_id}", exc_info=True)
     _pending_shadow.pop(tg_id, None)
 
 
@@ -510,6 +515,7 @@ async def cmd_help(message: Message):
         "*Команды бота*\n\n"
         "/start — главное меню\n"
         "/quiz — узнать свою Тень (тест)\n"
+        "/praktiki — практики «Манифеста 7» с проводником\n"
         "/products — что доступно\n"
         "/cabinet — мой кабинет\n"
         "/club — про Клуб «Манифест»\n"

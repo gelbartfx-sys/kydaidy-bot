@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT,
     first_name TEXT,
     povorot INTEGER,
+    shadow_dist TEXT,
     quiz_completed_at TIMESTAMP,
     nurture_day INTEGER DEFAULT 0,
     nurture_active INTEGER DEFAULT 0,
@@ -42,4 +43,12 @@ CREATE TABLE IF NOT EXISTS tribute_posts (
 CREATE TABLE IF NOT EXISTS shadow_generations (
     tg_id INTEGER PRIMARY KEY,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS manifest7_guide (
+    tg_id INTEGER,
+    practice INTEGER,
+    step INTEGER DEFAULT 0,
+    completed_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    PRIMARY KEY (tg_id, practice)
 );
