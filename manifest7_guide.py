@@ -16,7 +16,7 @@ import logging
 
 import aiohttp
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, BaseFilter
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
 )
@@ -174,8 +174,13 @@ async def _active_practice(tg_id: int) -> dict | None:
     return max(active, key=lambda r: str(r.get("updated_at") or ""))
 
 
-class _InGuideFilter:
-    """Пропускает текст в проводник, только когда есть незавершённая практика."""
+class _InGuideFilter(BaseFilter):
+    """Пропускает текст в проводник, только когда есть незавершённая практика.
+
+    ВАЖНО: наследование от BaseFilter обязательно — иначе aiogram 3 не await'ит
+    async-фильтр, получает объект-корутину (всегда truthy) и матчит ЛЮБОЙ текст,
+    из-за чего guide_router (подключён первым) глотает /start и прочие команды.
+    """
     async def __call__(self, message: Message) -> bool:
         if not message.text or message.text.startswith("/"):
             return False
