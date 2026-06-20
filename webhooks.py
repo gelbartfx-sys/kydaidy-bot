@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hmac
 import hashlib
 import logging
@@ -18,14 +19,30 @@ logger = logging.getLogger(__name__)
 
 
 def _verify_tribute_signature(body: bytes, signature: str) -> bool:
-    """Проверка подписи Tribute webhook."""
-    if not settings.tribute_webhook_secret:
-        return True  # для дев-режима
-    expected = hmac.new(
-        settings.tribute_webhook_secret.encode(),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
+    """Проверка подписи Tribute webhook (HMAC-SHA256, hex, header Trbt-Signature).
+
+    Tribute подписывает тем же ключом, что и API (см. DAY_LOG), поэтому при
+    отсутствии отдельного webhook-секрета используем tribute_api_key.
+    Fail-closed: если секрета нет вообще — отклоняем (кроме явного дев-режима).
+    """
+    secret = settings.tribute_webhook_secret or settings.tribute_api_key
+    if not secret:
+        return settings.webhook_dev_allow_unsigned
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+def _verify_tally_signature(body: bytes, signature: str) -> bool:
+    """Проверка подписи Tally webhook (HMAC-SHA256, base64, header tally-signature).
+
+    Fail-closed: без настроенного tally_webhook_secret все запросы отклоняются
+    (кроме явного дев-режима) — эндпоинт пишет в прод-БД.
+    """
+    if not settings.tally_webhook_secret:
+        return settings.webhook_dev_allow_unsigned
+    expected = base64.b64encode(
+        hmac.new(settings.tally_webhook_secret.encode(), body, hashlib.sha256).digest()
+    ).decode()
     return hmac.compare_digest(expected, signature)
 
 
@@ -36,7 +53,14 @@ async def tally_webhook(request: web.Request) -> web.Response:
     Tally отправляет JSON с ответами + UTM-параметром, который мы извлекаем как 'povorot'.
     """
     try:
-        data = await request.json()
+        body = await request.read()
+
+        signature = request.headers.get("tally-signature", "")
+        if not _verify_tally_signature(body, signature):
+            logger.warning(f"Tally webhook: bad signature, body={body[:200]!r}")
+            return web.Response(status=403, text="invalid signature")
+
+        data = json.loads(body)
         logger.info(f"Tally webhook: {json.dumps(data)[:200]}")
 
         # Извлекаем tg_id и povorot из hidden fields формы
@@ -65,7 +89,7 @@ async def tally_webhook(request: web.Request) -> web.Response:
         return web.Response(status=200, text="ok")
     except Exception as e:
         logger.exception(f"Tally webhook error: {e}")
-        return web.Response(status=500, text=str(e))
+        return web.Response(status=500, text="error")
 
 
 async def tribute_webhook(request: web.Request) -> web.Response:
@@ -108,7 +132,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         return web.Response(status=200, text="ok")
     except Exception as e:
         logger.exception(f"Tribute webhook error: {e}")
-        return web.Response(status=500, text=str(e))
+        return web.Response(status=500, text="error")
 
 
 _CHANNEL_BY_PRODUCT = {

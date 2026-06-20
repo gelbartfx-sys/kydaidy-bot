@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     tribute_webhook_secret: str = ""
     tally_webhook_secret: str = ""
 
+    # Fail-closed by default: webhooks without a configured signing secret are
+    # rejected. Set true ONLY for local dev to accept unsigned webhook calls.
+    webhook_dev_allow_unsigned: bool = False
+
     # Gemini (Nano Banana) — генерация портрета Тени + разбора в тесте архетипов.
     gemini_key: str = ""
 
