@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -55,11 +55,13 @@ def _is_curator(uid: int) -> bool:
     return uid == settings.curator_id or uid == settings.tg_admin_id
 
 
-def _tz() -> ZoneInfo:
+def _tz():
+    """Таймзона рассылки. Фолбэк на фиксированный UTC+3 (МСК, без DST),
+    если в контейнере нет tz-базы — тогда zoneinfo не нужен вовсе."""
     try:
         return ZoneInfo(settings.curator_tz)
     except Exception:
-        return ZoneInfo("Europe/Moscow")
+        return timezone(timedelta(hours=3))
 
 
 # ── Тон правок (источник: docs/voice-and-turns-sharp.md) ─────────────────────
