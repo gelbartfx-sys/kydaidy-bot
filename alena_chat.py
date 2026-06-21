@@ -37,11 +37,11 @@ from alena_persona import (
 logger = logging.getLogger(__name__)
 alena_router = Router()
 
-FREE_SESSIONS = 3          # встреч на окно
-WINDOW_DAYS = 30           # окно лимита (в БД-запросе)
+FREE_SESSIONS = 1          # бесплатных встреч на человека (пожизненно)
 TURN_CAP = 20              # предохранитель: после стольких реплик — мягкое закрытие
 HISTORY_LIMIT = 40         # сколько сообщений истории отдаём модели
 ONE_ON_ONE_URL = "https://web.tribute.tg/p/vKG"
+MANIFEST7_URL = "https://web.tribute.tg/p/vKD"
 
 
 def _is_unlimited(user) -> bool:
@@ -50,10 +50,13 @@ def _is_unlimited(user) -> bool:
 
 
 async def _remaining(user) -> int | None:
-    """Сколько встреч осталось; None — безлимит (whitelist)."""
+    """Сколько бесплатных встреч осталось; None — безлимит (whitelist).
+
+    Лимит — пожизненный (1 на человека), считаем все встречи, не за окно.
+    """
     if _is_unlimited(user):
         return None
-    used = await ai_sessions_used_30d(user.id)
+    used = await ai_total_sessions(user.id)
     return max(0, FREE_SESSIONS - used)
 
 
@@ -84,10 +87,17 @@ def _one_on_one_kbd() -> InlineKeyboardMarkup:
     ])
 
 
+def _m7_kbd() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Забрать «Манифест 7» — 1 990 ₽", url=MANIFEST7_URL)],
+        [InlineKeyboardButton(text="Сессия 1:1 с живой Алёной", url=ONE_ON_ONE_URL)],
+    ])
+
+
 _EXHAUSTED_TEXT = (
-    "В этом месяце мы уже встречались трижды — и это были настоящие встречи.\n\n"
-    "Если нужно идти глубже и сейчас — это уже живая Алёна, не текст на экране.\n\n"
-    "Новая встреча откроется, когда пройдёт месяц. Я никуда не денусь."
+    "Бесплатная встреча у нас уже была — одна на человека.\n\n"
+    "Дальше это не разговор, а работа: карта 5 поворотов — воркбук + колода. "
+    "А если хочешь глубже и со мной по-настоящему — живая сессия 1:1."
 )
 
 
@@ -104,7 +114,7 @@ async def _entry(target: Message, user):
         return
     if await ai_total_sessions(user.id) == 0:
         await target.answer(DISCLAIMER)
-    tail = "" if rem is None else f"\n\n_(встреч в этом месяце осталось: {rem} из {FREE_SESSIONS})_"
+    tail = "" if rem is None else "\n\n_(это твоя бесплатная встреча — одна на человека)_"
     await target.answer(INTRO + tail, reply_markup=_start_kbd())
 
 
@@ -264,15 +274,11 @@ async def _after_close(message: Message, user):
     rem = await _remaining(user)
     if rem is None:
         await message.answer(
-            "Когда будешь готова к новой теме — просто /alena.", reply_markup=_menu_kbd())
+            "Ещё разговор — просто /alena.", reply_markup=_menu_kbd())
         return
-    if rem <= 0:
-        await message.answer(
-            "Это была твоя последняя встреча в этом месяце.\n\n"
-            "Если нужно идти глубже и сейчас — это уже живая Алёна.",
-            reply_markup=_one_on_one_kbd())
-    else:
-        await message.answer(
-            f"На сегодня это всё.\n\nОсталось встреч в этом месяце: {rem} из {FREE_SESSIONS}. "
-            "Новая тема — /alena.",
-            reply_markup=_menu_kbd())
+    # Бесплатная встреча использована → первая ступень продуктовой матрицы.
+    await message.answer(
+        "Это была твоя бесплатная встреча — одна на человека.\n\n"
+        "Разговор показал, где ты. Если хочешь не разговор, а пройти весь путь — "
+        "карта 5 поворотов: воркбук + колода «Карта перепутья».",
+        reply_markup=_m7_kbd())
