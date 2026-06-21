@@ -92,10 +92,11 @@ async def main():
     )
     dp = Dispatcher()
     dp.update.outer_middleware(DMInspectMiddleware())
-    # guide_router и alena_router первыми: их текст-фильтры (активная практика /
-    # активная встреча) должны сработать раньше catch-all fallback в router.
-    dp.include_router(guide_router)
+    # alena_router и guide_router первыми: их текст-фильтры (активная встреча /
+    # активная практика) должны сработать раньше catch-all fallback в router.
+    # alena РАНЬШE guide: активная встреча с Алёной перебивает зависшую практику.
     dp.include_router(alena_router)
+    dp.include_router(guide_router)
     dp.include_router(router)
 
     # Запуск nurture-tick каждый час
