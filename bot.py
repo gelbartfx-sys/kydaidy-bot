@@ -27,6 +27,7 @@ from config import settings
 from database import init_db
 from handlers import router
 from manifest7_guide import guide_router
+from alena_chat import alena_router
 from nurture import run_nurture_tick
 from webhooks import setup_webhooks
 
@@ -91,9 +92,10 @@ async def main():
     )
     dp = Dispatcher()
     dp.update.outer_middleware(DMInspectMiddleware())
-    # guide_router первым: его текст-фильтр (активная практика) должен
-    # сработать раньше catch-all fallback в основном router.
+    # guide_router и alena_router первыми: их текст-фильтры (активная практика /
+    # активная встреча) должны сработать раньше catch-all fallback в router.
     dp.include_router(guide_router)
+    dp.include_router(alena_router)
     dp.include_router(router)
 
     # Запуск nurture-tick каждый час

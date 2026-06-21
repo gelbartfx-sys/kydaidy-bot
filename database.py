@@ -96,6 +96,24 @@ CREATE TABLE IF NOT EXISTS manifest7_guide (
     updated_at TIMESTAMP,
     PRIMARY KEY (tg_id, practice)
 );
+
+CREATE TABLE IF NOT EXISTS ai_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id INTEGER,
+    status TEXT DEFAULT 'active',
+    turns INTEGER DEFAULT 0,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ai_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER,
+    tg_id INTEGER,
+    role TEXT,
+    content TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -164,9 +182,34 @@ async def _exec(sql: str, params: tuple = (), fetch: str = "none"):
         return None
 
 
+# Идемпотентные DDL новых таблиц — докатываются в D1 прямо из рантайма
+# (креды D1 уже есть), чтобы не требовать ручного wrangler d1 execute.
+_RUNTIME_MIGRATIONS = (
+    """CREATE TABLE IF NOT EXISTS ai_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER,
+        status TEXT DEFAULT 'active',
+        turns INTEGER DEFAULT 0,
+        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        closed_at TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS ai_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER,
+        tg_id INTEGER,
+        role TEXT,
+        content TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+)
+
+
 async def init_db():
-    # Для D1 схема применяется вне кода (wrangler d1 execute --file=bot/schema.sql).
+    # Базовая схема в D1 применяется вне кода (wrangler), но новые таблицы
+    # докатываем идемпотентно отсюда — для обоих бэкендов.
     if USE_D1:
+        for ddl in _RUNTIME_MIGRATIONS:
+            await _exec(ddl)
         return
     async with get_db() as db:
         await db.executescript(SCHEMA)
@@ -327,3 +370,61 @@ async def get_tribute_post(product_code: str):
         (product_code,),
         fetch="one",
     )
+
+
+# ── «Алёна на связи» (сессии живого AI-диалога) ──────────────────────────────
+
+async def ai_active_session(tg_id: int):
+    return await _exec(
+        "SELECT * FROM ai_sessions WHERE tg_id = ? AND status = 'active' "
+        "ORDER BY id DESC LIMIT 1",
+        (tg_id,), fetch="one")
+
+
+async def ai_sessions_used_30d(tg_id: int) -> int:
+    row = await _exec(
+        "SELECT COUNT(*) AS n FROM ai_sessions WHERE tg_id = ? "
+        "AND datetime(started_at) > datetime('now', '-30 days')",
+        (tg_id,), fetch="one")
+    return int((row or {}).get("n") or 0)
+
+
+async def ai_total_sessions(tg_id: int) -> int:
+    row = await _exec(
+        "SELECT COUNT(*) AS n FROM ai_sessions WHERE tg_id = ?",
+        (tg_id,), fetch="one")
+    return int((row or {}).get("n") or 0)
+
+
+async def ai_open_session(tg_id: int):
+    """Создаёт активную встречу и возвращает её строку (с id)."""
+    await _exec(
+        "INSERT INTO ai_sessions (tg_id, status, turns) VALUES (?, 'active', 0)",
+        (tg_id,))
+    return await ai_active_session(tg_id)
+
+
+async def ai_close_session(session_id: int):
+    await _exec(
+        "UPDATE ai_sessions SET status = 'closed', closed_at = CURRENT_TIMESTAMP "
+        "WHERE id = ?",
+        (session_id,))
+
+
+async def ai_bump_turns(session_id: int):
+    await _exec(
+        "UPDATE ai_sessions SET turns = turns + 1 WHERE id = ?", (session_id,))
+
+
+async def ai_add_message(session_id: int, tg_id: int, role: str, content: str):
+    await _exec(
+        "INSERT INTO ai_messages (session_id, tg_id, role, content) "
+        "VALUES (?, ?, ?, ?)",
+        (session_id, tg_id, role, content))
+
+
+async def ai_get_messages(session_id: int, limit: int = 40):
+    return await _exec(
+        "SELECT role, content FROM ai_messages WHERE session_id = ? "
+        "ORDER BY id ASC LIMIT ?",
+        (session_id, limit), fetch="all")

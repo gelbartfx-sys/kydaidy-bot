@@ -86,6 +86,7 @@ def _nurture_optin_keyboard() -> InlineKeyboardMarkup:
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="💬 Алёна на связи", callback_data="alena")],
             [InlineKeyboardButton(text="🌑 Узнать свою Тень", callback_data="quiz")],
             [InlineKeyboardButton(text="🛍️ Что доступно", callback_data="products")],
             [InlineKeyboardButton(text="👤 Мой кабинет", callback_data="cabinet")],
@@ -514,6 +515,7 @@ async def cmd_help(message: Message):
     await message.answer(
         "*Команды бота*\n\n"
         "/start — главное меню\n"
+        "/alena — личная встреча с Алёной (AI, бесплатно)\n"
         "/quiz — узнать свою Тень (тест)\n"
         "/praktiki — практики «Манифеста 7» с проводником\n"
         "/products — что доступно\n"

@@ -52,3 +52,19 @@ CREATE TABLE IF NOT EXISTS manifest7_guide (
     updated_at TIMESTAMP,
     PRIMARY KEY (tg_id, practice)
 );
+CREATE TABLE IF NOT EXISTS ai_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id INTEGER,
+    status TEXT DEFAULT 'active',
+    turns INTEGER DEFAULT 0,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS ai_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER,
+    tg_id INTEGER,
+    role TEXT,
+    content TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
