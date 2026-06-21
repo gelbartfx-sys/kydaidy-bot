@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # Closed TG channel IDs (numeric, like -1001234567890). Bot must be admin
     # with "Invite Users via Link" permission. Empty => fallback text without link.
     manifest_7_channel_id: int = 0
-    manifest_club_channel_id: int = 0
+    manifest_club_channel_id: int = -1003798652811  # Клуб «Манифест» (closed channel)
     manifest_plus_channel_id: int = 0
 
     # ── Контент-конвейер (курирование Алёной) ────────────────────────────────
