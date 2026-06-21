@@ -11,8 +11,10 @@ import json
 from aiohttp import web
 from aiogram import Bot
 
+from urllib.parse import quote
+
 from config import settings
-from database import upsert_user, add_purchase, add_subscription
+from database import upsert_user, add_purchase, add_subscription, get_user
 from handlers import _send_povorot_result
 
 logger = logging.getLogger(__name__)
@@ -143,9 +145,9 @@ _CHANNEL_BY_PRODUCT = {
 
 _BASE_TEXTS = {
     "manifest_7": (
-        "✅ Спасибо. «Манифест 7» — твой.\n\n"
+        "✅ Спасибо. Воркбук «Манифест 7» — твой.\n\n"
         "Что внутри:\n"
-        "• Воркбук + колода «Карта перепутья» — в закрытом канале\n"
+        "• Воркбук «Манифест 7» — в закрытом канале\n"
         "• Практики с проводником — прямо в боте: /praktiki. "
         "Веду шаг за шагом, темп задаёшь ты\n\n"
         "Никаких обещаний быстрого результата. Карта работает, когда ты готова смотреть."
@@ -162,9 +164,31 @@ _BASE_TEXTS = {
     ),
     "manifest_1on1": (
         "✅ Запись на «Манифест 1:1» оплачена.\n\n"
-        "Я свяжусь с тобой в течение 24 часов для согласования времени сессии."
+        "Теперь выбери удобное окно в моём календаре и подтверди запись — там же "
+        "напиши тему запроса и пару деталей, чтобы я пришла к встрече готовой."
     ),
 }
+
+
+async def _calendly_link_for(tg_id: int) -> str | None:
+    """Ссылка на календарь Алёны для записи 1:1, с префиллом темы запроса.
+
+    Запрос, вскрытый на AI-встрече, подставляем в первый кастомный вопрос
+    Calendly (?a1=...). Нет настроенного календаря — None (fallback на текст).
+    """
+    base = settings.calendly_1on1_url
+    if not base:
+        return None
+    request = None
+    try:
+        u = await get_user(tg_id)
+        request = (u or {}).get("last_ai_request")
+    except Exception:
+        logger.warning("calendly prefill: get_user failed (continuing)", exc_info=True)
+    if request:
+        sep = "&" if "?" in base else "?"
+        return f"{base}{sep}a1={quote(request)}"
+    return base
 
 
 async def _create_personal_invite(bot: Bot, channel_id: int, tg_id: int, product_code: str) -> str | None:
@@ -205,6 +229,14 @@ async def _grant_access(bot: Bot, tg_id: int, product_code: str):
         else:
             logger.warning(f"channel_id not configured for {product_code} — sending text only")
             text += "\n\n_Сейчас Алёна свяжется с тобой лично._"
+
+    # 1:1 → ссылка на календарь с окнами (+ префилл темы запроса со встречи).
+    if product_code == "manifest_1on1":
+        cal = await _calendly_link_for(tg_id)
+        if cal:
+            text += f"\n\n🗓 Календарь Алёны — выбери окно:\n{cal}"
+        else:
+            text += "\n\n_Календарь скоро открою — Алёна свяжется с тобой лично для записи._"
 
     text += "\n\n— Алёна"
 

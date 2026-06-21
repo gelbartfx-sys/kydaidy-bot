@@ -25,7 +25,7 @@ from config import settings
 from ai_quiz import _TONE_SYSTEM, TEXT_MODEL, BASE
 from shadow_test import ARCHETYPES, decode_distribution, winner_from_counts
 from database import (
-    get_user, get_user_purchases,
+    get_user, get_user_purchases, get_active_subscription,
     guide_get_all, guide_get, guide_set_step, guide_complete,
 )
 from manifest7_guide_data import PRACTICES, INTRO, OUTRO_ALL_DONE
@@ -33,6 +33,8 @@ from manifest7_guide_data import PRACTICES, INTRO, OUTRO_ALL_DONE
 logger = logging.getLogger(__name__)
 guide_router = Router()
 
+# Практики-проводник — бонус Клуба «Манифест». Историческим покупателям
+# разового «Манифеста 7» доступ тоже сохраняем.
 GUIDE_PRODUCT = "manifest_7"
 
 
@@ -42,14 +44,16 @@ async def _has_access(user) -> bool:
     from handlers import _is_unlimited  # late import: избегаем цикла
     if _is_unlimited(user):
         return True
+    if await get_active_subscription(user.id, "manifest_club"):
+        return True
     purchases = await get_user_purchases(user.id) or []
     return any(p["product_code"] == GUIDE_PRODUCT for p in purchases)
 
 
 NO_ACCESS_TEXT = (
-    "Практики с проводником — часть «Манифеста 7» (воркбук + 7 практик "
-    "+ колода карты перепутья).\n\n"
-    "Если он у тебя уже есть, а доступ не открылся — напиши @kydaidy, разберёмся."
+    "Практики с проводником — бонус Клуба «Манифест» (воркбук + 7 практик "
+    "+ эфир раз в неделю + безлимит «Алёны на связи»).\n\n"
+    "Уже в Клубе, а доступ не открылся — напиши @kydaidy, разберёмся."
 )
 
 

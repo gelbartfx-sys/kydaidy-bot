@@ -28,10 +28,11 @@ from database import (
     get_user, get_active_subscription,
     ai_active_session, ai_total_sessions,
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
-    ai_close_session,
+    ai_close_session, ai_set_last_request,
 )
 from alena_persona import (
     build_system, DISCLAIMER, INTRO, CLOSE_MARK, is_crisis, CRISIS_REPLY,
+    extract_request,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,14 @@ def _club_kbd() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Войти в Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
         [InlineKeyboardButton(text="Сессия 1:1 с живой Алёной", url=ONE_ON_ONE_URL)],
+    ])
+
+
+def _bridge_kbd() -> InlineKeyboardMarkup:
+    """Нативный мост: вскрытый запрос → 1:1 первым, Клуб — мягкой альтернативой."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Взять этот запрос на встречу 1:1", url=ONE_ON_ONE_URL)],
+        [InlineKeyboardButton(text="Быть рядом регулярно — Клуб 990 ₽/мес", url=CLUB_URL)],
     ])
 
 
@@ -266,25 +275,54 @@ async def on_alena_talk(message: Message):
 
     closed = (CLOSE_MARK in reply) or force_close
     reply = reply.replace(CLOSE_MARK, "").strip()
+    reply, request = extract_request(reply)
     await ai_add_message(sid, user.id, "model", reply)
 
     if closed:
         await ai_close_session(sid)
+        if request:
+            await ai_set_last_request(user.id, request)
         await message.answer(reply, parse_mode=None)
-        await _after_close(message, user)
+        await _after_close(message, user, request)
     else:
         await message.answer(reply, parse_mode=None, reply_markup=_pause_kbd())
 
 
-async def _after_close(message: Message, user):
+async def _after_close(message: Message, user, request: str | None = None):
     rem = await _remaining(user)
+
+    # Вскрылся настоящий запрос → ведём дальше. Куда именно — по сегменту:
+    if request:
+        q = request.strip().rstrip(".")
+        if rem is None:
+            # Член Клуба / whitelist → тёплый докрут в 1:1 (я тебя уже знаю).
+            await message.answer(
+                f"Твой настоящий запрос — вот он:\n\n«{q}»\n\n"
+                "Я тебе его показала. Но показать — не значит прожить. Размотать это и "
+                "правда поменять — работа для живой встречи, не для переписки.\n\n"
+                "Готова взять этот запрос в работу со мной лично — вот дверь. После "
+                "оплаты откроется мой календарь: выберешь окно и придёшь именно с этим."
+                "\n\n— Алёна",
+                reply_markup=_bridge_kbd(), parse_mode=None)
+            return
+        # Бесплатная встреча исчерпана → первая ступень = Клуб (низкий порог).
+        # 1:1 оставляем опцией для тех, кто уже готов вглубь.
+        await message.answer(
+            f"Твой настоящий запрос — вот он:\n\n«{q}»\n\n"
+            "Показать я показала. Но это только начало — дальше с этим надо быть рядом, "
+            "не разово.\n\n"
+            "В Клубе «Манифест» продолжим без лимита: я докручиваю это с тобой в чате и "
+            "на эфирах. А если готова сразу глубоко и лично — сессия 1:1.\n\n— Алёна",
+            reply_markup=_club_kbd(), parse_mode=None)
+        return
+
+    # Запроса не вскрылось / ей хватило — честно, без втюхивания.
     if rem is None:
         await message.answer(
-            "Ещё разговор — просто /alena.", reply_markup=_menu_kbd())
+            "На сегодня всё. Ещё разговор — просто /alena.", reply_markup=_menu_kbd())
         return
-    # Бесплатная встреча использована → первая ступень продуктовой матрицы.
     await message.answer(
         "Это была твоя бесплатная встреча — одна на человека.\n\n"
-        "Разговор показал, где ты. Если хочешь не разговор, а пройти весь путь — "
-        "карта 5 поворотов: воркбук + колода «Карта перепутья».",
+        "Если захочешь продолжить — я рядом: регулярно в Клубе «Манифест», "
+        "а вглубь и лично — на встрече 1:1.",
         reply_markup=_club_kbd())

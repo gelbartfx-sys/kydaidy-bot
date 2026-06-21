@@ -55,12 +55,11 @@ from content_data import (
     CLUB_DESCRIPTION,
 )
 
-VALID_PRODUCT_CODES = ("manifest_7", "manifest_club", "manifest_1on1")
+VALID_PRODUCT_CODES = ("manifest_club", "manifest_1on1")
 
 # Tribute purchase URLs — used as inline button on copied product cards.
 # copyMessage doesn't preserve the original inline keyboard, so we add it back.
 PRODUCT_BUY_URLS = {
-    "manifest_7":    ("Получить",    "https://web.tribute.tg/p/vKD"),
     "manifest_club": ("Подписаться", "https://t.me/tribute/app?startapp=sULY"),
     "manifest_1on1": ("Записаться",  "https://web.tribute.tg/p/vKG"),
 }
@@ -223,9 +222,9 @@ async def on_photo(message: Message):
     )
     await message.answer(
         "Твой архетип — это *Тень*: где ты защищаешься сейчас, в какой маске застряла.\n\n"
-        "Путь сквозь неё — *карта 5 поворотов*. Это «Манифест»: воркбук и колода — "
-        "дорога от защиты обратно к себе.\n\n"
-        "Если захочешь пройти этот путь — вот с чего начать ↓",
+        "Путь сквозь неё — *карта 5 поворотов*. Хочешь поговорить про свою Тень "
+        "начистоту — у меня есть бесплатная встреча: /alena\n\n"
+        "А вот с чего ещё можно начать ↓",
         parse_mode="Markdown",
         reply_markup=_products_menu_keyboard(),
     )
@@ -323,7 +322,7 @@ async def cb_nurture_no(callback: CallbackQuery):
 def _products_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✦ «Манифест 7» — 1 990 ₽", callback_data="buy:manifest_7")],
+            [InlineKeyboardButton(text="💬 Алёна на связи — бесплатно", callback_data="alena")],
             [InlineKeyboardButton(text="✦ Клуб «Манифест» — 990 ₽/мес", callback_data="buy:manifest_club")],
             [InlineKeyboardButton(text="✦ «Манифест 1:1» — от 7 000 ₽", callback_data="buy:manifest_1on1")],
         ]
@@ -529,17 +528,16 @@ async def cmd_help(message: Message):
 
 def _detect_product_code(caption: str | None) -> str | None:
     """Определяет product_code по тексту/caption поста от Tribute.
-    Самое специфичное вперёд (1:1) → дальше клуб → манифест 7.
+    Самое специфичное вперёд (1:1) → дальше клуб.
     """
     if not caption:
         return None
     text = caption.lower()
     if "1:1" in text or "1 на 1" in text or "личная сессия" in text or "audio-call" in text:
         return "manifest_1on1"
-    if "клуб" in text or "манифест дня" in text or "5-7 минут" in text or "5–7 минут" in text:
+    if ("клуб" in text or "эфир" in text or "воркбук" in text or "безлимит" in text
+            or "990" in text):
         return "manifest_club"
-    if "манифест 7" in text or "воркбук" in text or "pdf" in text or "7 аудио" in text or "5 поворотов" in text:
-        return "manifest_7"
     return None
 
 
@@ -569,7 +567,6 @@ async def auto_capture_tribute(message: Message):
     await message.reply(
         f"📥 Пост от @tribute получен. Какой это продукт?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✦ Манифест 7", callback_data=f"cap:manifest_7:{src_message_id}")],
             [InlineKeyboardButton(text="✦ Клуб «Манифест»", callback_data=f"cap:manifest_club:{src_message_id}")],
             [InlineKeyboardButton(text="✦ Манифест 1:1", callback_data=f"cap:manifest_1on1:{src_message_id}")],
         ]),

@@ -28,6 +28,7 @@ from database import init_db
 from handlers import router
 from manifest7_guide import guide_router
 from alena_chat import alena_router
+from curator import curator_router, push_daily_batch, publish_tick
 from nurture import run_nurture_tick
 from webhooks import setup_webhooks
 
@@ -92,9 +93,12 @@ async def main():
     )
     dp = Dispatcher()
     dp.update.outer_middleware(DMInspectMiddleware())
-    # alena_router и guide_router первыми: их текст-фильтры (активная встреча /
-    # активная практика) должны сработать раньше catch-all fallback в router.
+    # curator_router ПЕРВЫМ: текст-фильтр режима правки (только когда куратор
+    # awaiting='edit') должен перехватить сообщение Алёны раньше AI-встречи и catch-all.
+    # alena_router и guide_router: их текст-фильтры (активная встреча / практика)
+    # должны сработать раньше catch-all fallback в router.
     # alena РАНЬШE guide: активная встреча с Алёной перебивает зависшую практику.
+    dp.include_router(curator_router)
     dp.include_router(alena_router)
     dp.include_router(guide_router)
     dp.include_router(router)
@@ -102,6 +106,14 @@ async def main():
     # Запуск nurture-tick каждый час
     scheduler = AsyncIOScheduler()
     scheduler.add_job(run_nurture_tick, "interval", hours=1, args=[bot])
+    # Контент-конвейер: утренняя рассылка батча куратору + дрип-автопостинг в канал.
+    scheduler.add_job(
+        push_daily_batch, "cron",
+        hour=settings.curator_push_hour, minute=0,
+        timezone=settings.curator_tz, args=[bot])
+    scheduler.add_job(
+        publish_tick, "interval",
+        minutes=settings.curator_publish_every_min, args=[bot])
     scheduler.start()
 
     # Webhook server (для Tally + Tribute)

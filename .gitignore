@@ -12,3 +12,6 @@ __pycache__/
 .DS_Store
 content/pdf/*.pdf
 !content/pdf/.gitkeep
+
+# Старое TTS-аудио практик — не используется, не кладём в деплой
+content/audio/manifest-7/

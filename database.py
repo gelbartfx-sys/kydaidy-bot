@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS users (
     nurture_day INTEGER DEFAULT 0,
     nurture_active INTEGER DEFAULT 0,
     last_nurture_at TIMESTAMP,
+    last_ai_request TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -204,6 +205,41 @@ _RUNTIME_MIGRATIONS = (
         content TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""",
+    # Колонка для нативного моста AI→1:1: вскрытый запрос префиллим в запись.
+    # ALTER упадёт «duplicate column» после первого прогона — это ловится
+    # try/except в init_db (деградирует только эта фича).
+    "ALTER TABLE users ADD COLUMN last_ai_request TEXT",
+    # ── Контент-конвейер (курирование Алёной + автопостинг) ──────────────────
+    """CREATE TABLE IF NOT EXISTS content_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch TEXT,
+        ext_id TEXT,
+        channel TEXT,
+        fmt TEXT,
+        hypothesis TEXT,
+        draft TEXT,
+        final TEXT,
+        visual TEXT,
+        cta TEXT,
+        status TEXT DEFAULT 'pending',
+        position INTEGER,
+        decided_at TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS curator_state (
+        curator_id INTEGER PRIMARY KEY,
+        current_item INTEGER,
+        awaiting TEXT,
+        last_pushed_date TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS post_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER,
+        channel TEXT,
+        text TEXT,
+        status TEXT DEFAULT 'queued',
+        queued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        posted_at TIMESTAMP
+    )""",
 )
 
 
@@ -242,6 +278,23 @@ async def upsert_user(tg_id: int, username: str | None, first_name: str | None, 
 
 async def get_user(tg_id: int):
     return await _exec("SELECT * FROM users WHERE tg_id = ?", (tg_id,), fetch="one")
+
+
+async def ai_set_last_request(tg_id: int, request: str | None):
+    """Сохранить последний вскрытый на AI-встрече запрос (для префилла записи 1:1).
+
+    Крэш-сейф: если колонки ещё нет (миграция не докатилась) — деградируем
+    тихо, не ломая закрытие встречи.
+    """
+    if not request:
+        return
+    try:
+        await _exec(
+            "UPDATE users SET last_ai_request = ? WHERE tg_id = ?",
+            (request, tg_id),
+        )
+    except Exception:
+        logger.warning("ai_set_last_request failed (continuing)", exc_info=True)
 
 
 async def save_shadow_dist(tg_id: int, dist: str):
@@ -442,3 +495,130 @@ async def ai_get_messages(session_id: int, limit: int = 40):
         "SELECT role, content FROM ai_messages WHERE session_id = ? "
         "ORDER BY id ASC LIMIT ?",
         (session_id, limit), fetch="all")
+
+
+# ── Контент-конвейер: items ──────────────────────────────────────────────────
+
+async def content_batch_size(batch: str) -> int:
+    row = await _exec(
+        "SELECT COUNT(*) AS n FROM content_items WHERE batch = ?",
+        (batch,), fetch="one")
+    return int((row or {}).get("n") or 0)
+
+
+async def content_add_item(batch, ext_id, channel, fmt, hypothesis,
+                           draft, visual, cta, position):
+    await _exec(
+        """INSERT INTO content_items
+           (batch, ext_id, channel, fmt, hypothesis, draft, visual, cta, position)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (batch, ext_id, channel, fmt, hypothesis, draft, visual, cta, position))
+
+
+async def content_get_item(item_id: int):
+    return await _exec(
+        "SELECT * FROM content_items WHERE id = ?", (item_id,), fetch="one")
+
+
+async def content_next_pending(batch: str | None = None):
+    if batch:
+        return await _exec(
+            "SELECT * FROM content_items WHERE status = 'pending' AND batch = ? "
+            "ORDER BY position ASC, id ASC LIMIT 1", (batch,), fetch="one")
+    return await _exec(
+        "SELECT * FROM content_items WHERE status = 'pending' "
+        "ORDER BY position ASC, id ASC LIMIT 1", fetch="one")
+
+
+async def content_set_final(item_id: int, text: str):
+    await _exec(
+        "UPDATE content_items SET final = ? WHERE id = ?", (text, item_id))
+
+
+async def content_decide(item_id: int, status: str):
+    """status: 'approved' | 'rejected'. Для approved final ← draft, если пуст."""
+    await _exec(
+        "UPDATE content_items SET status = ?, "
+        "final = COALESCE(final, draft), decided_at = CURRENT_TIMESTAMP "
+        "WHERE id = ?", (status, item_id))
+
+
+async def content_defer(item_id: int):
+    """«Потом»: отодвигает item в конец очереди, не меняя статус pending."""
+    await _exec(
+        "UPDATE content_items SET position = position + 100000 WHERE id = ?",
+        (item_id,))
+
+
+async def content_counts():
+    rows = await _exec(
+        "SELECT status, COUNT(*) AS n FROM content_items GROUP BY status",
+        fetch="all") or []
+    out = {"pending": 0, "approved": 0, "rejected": 0}
+    for r in rows:
+        out[r["status"]] = int(r["n"])
+    return out
+
+
+async def content_approved_by_channel(channel: str | None = None):
+    if channel:
+        return await _exec(
+            "SELECT * FROM content_items WHERE status = 'approved' AND channel = ? "
+            "ORDER BY position ASC", (channel,), fetch="all") or []
+    return await _exec(
+        "SELECT * FROM content_items WHERE status = 'approved' "
+        "ORDER BY channel, position ASC", fetch="all") or []
+
+
+# ── Контент-конвейер: состояние куратора ─────────────────────────────────────
+
+async def curator_get_state(curator_id: int):
+    return await _exec(
+        "SELECT * FROM curator_state WHERE curator_id = ?",
+        (curator_id,), fetch="one")
+
+
+async def curator_set_state(curator_id: int, current_item, awaiting):
+    await _exec(
+        """INSERT INTO curator_state (curator_id, current_item, awaiting)
+           VALUES (?, ?, ?)
+           ON CONFLICT(curator_id) DO UPDATE SET
+               current_item = excluded.current_item,
+               awaiting = excluded.awaiting""",
+        (curator_id, current_item, awaiting))
+
+
+async def curator_mark_pushed(curator_id: int, date_str: str):
+    await _exec(
+        """INSERT INTO curator_state (curator_id, last_pushed_date)
+           VALUES (?, ?)
+           ON CONFLICT(curator_id) DO UPDATE SET
+               last_pushed_date = excluded.last_pushed_date""",
+        (curator_id, date_str))
+
+
+# ── Контент-конвейер: очередь публикации ─────────────────────────────────────
+
+async def pq_enqueue(item_id: int, channel: str, text: str):
+    await _exec(
+        "INSERT INTO post_queue (item_id, channel, text) VALUES (?, ?, ?)",
+        (item_id, channel, text))
+
+
+async def pq_next_queued(channel: str):
+    return await _exec(
+        "SELECT * FROM post_queue WHERE status = 'queued' AND channel = ? "
+        "ORDER BY id ASC LIMIT 1", (channel,), fetch="one")
+
+
+async def pq_mark_posted(pq_id: int):
+    await _exec(
+        "UPDATE post_queue SET status = 'posted', posted_at = CURRENT_TIMESTAMP "
+        "WHERE id = ?", (pq_id,))
+
+
+async def pq_counts():
+    rows = await _exec(
+        "SELECT channel, COUNT(*) AS n FROM post_queue WHERE status = 'queued' "
+        "GROUP BY channel", fetch="all") or []
+    return {r["channel"]: int(r["n"]) for r in rows}
