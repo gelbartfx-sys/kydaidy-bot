@@ -1,9 +1,9 @@
 """«Алёна на связи» — бесплатный AI-диалог, имитирующий подход Алёны.
 
 Модель: одна встреча = один запрос; копаем до настоящего ответа.
-Лимит — 3 встречи на скользящие 30 дней (whitelist — без лимита).
-Списание — при старте встречи (кнопка «Начать»). Память диалога — в БД
-(переживает рестарты Render). На исчерпании лимита — мягкий апселл на 1:1.
+Лимит — 1 бесплатная встреча на человека (пожизненно). Безлимит — whitelist
+ИЛИ активная подписка Клуба «Манифест». Списание — при старте встречи.
+Память диалога — в БД. На исчерпании — апселл в Клуб 990/мес (там безлимит).
 
 Роутер подключается в bot.py ДО основного router: текст-фильтр (активная
 встреча) должен сработать раньше catch-all fallback.
@@ -25,8 +25,8 @@ from config import settings
 from ai_quiz import BASE, TEXT_MODEL
 from shadow_test import ARCHETYPES, decode_distribution, winner_from_counts
 from database import (
-    get_user,
-    ai_active_session, ai_sessions_used_30d, ai_total_sessions,
+    get_user, get_active_subscription,
+    ai_active_session, ai_total_sessions,
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
     ai_close_session,
 )
@@ -41,7 +41,7 @@ FREE_SESSIONS = 1          # бесплатных встреч на челове
 TURN_CAP = 20              # предохранитель: после стольких реплик — мягкое закрытие
 HISTORY_LIMIT = 40         # сколько сообщений истории отдаём модели
 ONE_ON_ONE_URL = "https://web.tribute.tg/p/vKG"
-MANIFEST7_URL = "https://web.tribute.tg/p/vKD"
+CLUB_URL = "https://t.me/tribute/app?startapp=sULY"
 
 
 def _is_unlimited(user) -> bool:
@@ -49,12 +49,17 @@ def _is_unlimited(user) -> bool:
     return _h(user)
 
 
-async def _remaining(user) -> int | None:
-    """Сколько бесплатных встреч осталось; None — безлимит (whitelist).
+async def _is_club_member(tg_id: int) -> bool:
+    return await get_active_subscription(tg_id, "manifest_club") is not None
 
-    Лимит — пожизненный (1 на человека), считаем все встречи, не за окно.
+
+async def _remaining(user) -> int | None:
+    """Сколько бесплатных встреч осталось; None — безлимит.
+
+    Безлимит — whitelist ИЛИ активная подписка Клуба «Манифест».
+    Для остальных лимит пожизненный (1 на человека).
     """
-    if _is_unlimited(user):
+    if _is_unlimited(user) or await _is_club_member(user.id):
         return None
     used = await ai_total_sessions(user.id)
     return max(0, FREE_SESSIONS - used)
@@ -87,17 +92,18 @@ def _one_on_one_kbd() -> InlineKeyboardMarkup:
     ])
 
 
-def _m7_kbd() -> InlineKeyboardMarkup:
+def _club_kbd() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Забрать «Манифест 7» — 1 990 ₽", url=MANIFEST7_URL)],
+        [InlineKeyboardButton(text="Войти в Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
         [InlineKeyboardButton(text="Сессия 1:1 с живой Алёной", url=ONE_ON_ONE_URL)],
     ])
 
 
 _EXHAUSTED_TEXT = (
     "Бесплатная встреча у нас уже была — одна на человека.\n\n"
-    "Дальше это не разговор, а работа: карта 5 поворотов — воркбук + колода. "
-    "А если хочешь глубже и со мной по-настоящему — живая сессия 1:1."
+    "Хочешь говорить со мной без лимита — это Клуб «Манифест»: безлимит наших "
+    "встреч + мой живой голос + эфир раз в неделю. 990 ₽/мес.\n\n"
+    "А если хочешь вглубь и со мной лично — сессия 1:1."
 )
 
 
@@ -110,7 +116,7 @@ async def _entry(target: Message, user):
         return
     rem = await _remaining(user)
     if rem is not None and rem <= 0:
-        await target.answer(_EXHAUSTED_TEXT, reply_markup=_one_on_one_kbd())
+        await target.answer(_EXHAUSTED_TEXT, reply_markup=_club_kbd())
         return
     if await ai_total_sessions(user.id) == 0:
         await target.answer(DISCLAIMER)
@@ -138,7 +144,7 @@ async def cb_start(callback: CallbackQuery):
         return
     rem = await _remaining(user)
     if rem is not None and rem <= 0:
-        await callback.message.answer(_EXHAUSTED_TEXT, reply_markup=_one_on_one_kbd())
+        await callback.message.answer(_EXHAUSTED_TEXT, reply_markup=_club_kbd())
         await callback.answer()
         return
     await ai_open_session(user.id)  # списание встречи — при старте
@@ -281,4 +287,4 @@ async def _after_close(message: Message, user):
         "Это была твоя бесплатная встреча — одна на человека.\n\n"
         "Разговор показал, где ты. Если хочешь не разговор, а пройти весь путь — "
         "карта 5 поворотов: воркбук + колода «Карта перепутья».",
-        reply_markup=_m7_kbd())
+        reply_markup=_club_kbd())

@@ -315,6 +315,13 @@ async def get_user_purchases(tg_id: int):
     )
 
 
+async def get_active_subscription(tg_id: int, product_code: str):
+    return await _exec(
+        "SELECT * FROM subscriptions WHERE tg_id = ? AND product_code = ? "
+        "AND active = 1 ORDER BY id DESC LIMIT 1",
+        (tg_id, product_code), fetch="one")
+
+
 # ── AI-проводник «Манифест 7» (прогресс практик) ─────────────────────────────
 
 async def guide_get_all(tg_id: int):
