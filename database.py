@@ -15,11 +15,14 @@ D1 — это SQLite под капотом, поэтому весь SQL ниже
 from __future__ import annotations
 
 import os
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 
 import aiohttp
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = "kydaidy.db"
 
@@ -208,8 +211,12 @@ async def init_db():
     # Базовая схема в D1 применяется вне кода (wrangler), но новые таблицы
     # докатываем идемпотентно отсюда — для обоих бэкендов.
     if USE_D1:
+        # Крэш-сейф: ошибка миграции деградирует ТОЛЬКО новую фичу, не весь бот.
         for ddl in _RUNTIME_MIGRATIONS:
-            await _exec(ddl)
+            try:
+                await _exec(ddl)
+            except Exception:
+                logger.warning("D1 runtime migration failed (continuing)", exc_info=True)
         return
     async with get_db() as db:
         await db.executescript(SCHEMA)
