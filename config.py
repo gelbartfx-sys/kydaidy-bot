@@ -34,7 +34,7 @@ class Settings(BaseSettings):
 
     # Публичный календарь Алёны для записи на 1:1 (Calendly). Окна видны на странице;
     # тему запроса префиллим через ?a1=... (первый кастомный вопрос формы).
-    calendly_1on1_url: str = ""
+    calendly_1on1_url: str = "https://calendly.com/al-lazovsky/30min"
 
     # Closed TG channel IDs (numeric, like -1001234567890). Bot must be admin
     # with "Invite Users via Link" permission. Empty => fallback text without link.
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # нужен числовой id. Узнать: Алёна шлёт боту /myid, число → сюда в env.
     # 0 => утренняя рассылка выключена; ручной /curate доступен админу (tg_admin_id).
     curator_id: int = 0
-    curator_username: str = "@al.lazovsky"
+    curator_username: str = "@al_lazovsky"
     # Час утренней рассылки батча куратору (по curator_tz) и шаг дрипа публикации.
     curator_push_hour: int = 9
     curator_tz: str = "Europe/Moscow"
