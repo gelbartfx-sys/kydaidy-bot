@@ -192,8 +192,10 @@ async def _send_next(bot, chat_id: int, curator_id: int):
 @curator_router.message(Command("myid"))
 async def cmd_myid(message: Message):
     u = message.from_user
+    # parse_mode=None обязателен: дефолт бота = Markdown, а username с «_»
+    # (напр. @al_lazovsky) ломает разметку → TelegramBadRequest и тишина.
     await message.answer(
-        f"Твой Telegram id: `{u.id}`\n@{u.username or '—'}", parse_mode="Markdown")
+        f"Твой Telegram id: {u.id}\n@{u.username or '—'}", parse_mode=None)
 
 
 @curator_router.message(Command("curate_load"))
