@@ -33,7 +33,7 @@ from curator_data import BATCH, ITEMS
 from database import (
     content_batch_size, content_add_item, content_get_item,
     content_next_pending, content_set_final, content_decide, content_defer,
-    content_counts, content_approved_by_channel,
+    content_counts, content_approved_by_channel, content_wipe_batch,
     curator_get_state, curator_set_state, curator_mark_pushed,
     pq_enqueue, pq_next_queued, pq_mark_posted, pq_counts,
 )
@@ -213,6 +213,20 @@ async def cmd_load(message: Message):
     await message.answer(
         f"Загрузила батч «{BATCH}»: {len(ITEMS)} единиц.\nНачать курировать — /curate.",
         parse_mode=None)
+
+
+@curator_router.message(Command("curate_reload"))
+async def cmd_reload(message: Message):
+    """Стереть батч и залить заново из curator_data (новая версия призывов)."""
+    if message.from_user.id != settings.tg_admin_id:
+        return
+    await content_wipe_batch(BATCH)
+    await curator_set_state(message.from_user.id, None, None)
+    for pos, (ext_id, channel, fmt, hyp, draft, visual, cta) in enumerate(ITEMS):
+        await content_add_item(BATCH, ext_id, channel, fmt, hyp, draft, visual, cta, pos)
+    await message.answer(
+        f"Перезалила батч «{BATCH}»: {len(ITEMS)} единиц (новые призывы). "
+        "Курировать — /curate.", parse_mode=None)
 
 
 @curator_router.message(Command("curate"))

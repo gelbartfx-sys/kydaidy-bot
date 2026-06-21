@@ -550,6 +550,11 @@ async def content_defer(item_id: int):
         (item_id,))
 
 
+async def content_wipe_batch(batch: str):
+    """Полностью удаляет батч (для /curate_reload — перезалить новую версию)."""
+    await _exec("DELETE FROM content_items WHERE batch = ?", (batch,))
+
+
 async def content_counts():
     rows = await _exec(
         "SELECT status, COUNT(*) AS n FROM content_items GROUP BY status",
