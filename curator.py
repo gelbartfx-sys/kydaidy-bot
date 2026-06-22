@@ -25,6 +25,7 @@ from aiogram import Router, F
 from aiogram.filters import Command, BaseFilter
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    BufferedInputFile,
 )
 
 from config import settings
@@ -158,6 +159,30 @@ def _card_text(item: dict, pending: int, prefix: str = "") -> str:
     return "\n".join(lines)
 
 
+async def _send_pin_image(bot, chat_id: int, item: dict, caption: str | None = None):
+    """Рендер брендового пина из тезиса и отправка картинкой. Тихо пропускаем при сбое."""
+    try:
+        from pin_image import render_pin
+        png = render_pin(
+            item.get("final") or item.get("draft") or "",
+            item.get("fmt"), item.get("ext_id"))
+    except Exception:
+        logger.exception("pin render failed for %s", item.get("ext_id"))
+        return False
+    cap = caption if caption is not None else f"📌 Пин {item.get('ext_id')} — готов для Pinterest"
+    if item.get("cta") and caption is None:
+        cap += f"\n➡️ {item['cta']}"
+    try:
+        await bot.send_photo(
+            chat_id,
+            BufferedInputFile(png, filename=f"pin_{item.get('ext_id')}.png"),
+            caption=cap, parse_mode=None)
+        return True
+    except Exception:
+        logger.exception("pin send failed for %s", item.get("ext_id"))
+        return False
+
+
 async def _send_card(bot_or_msg, chat_id: int, item: dict, prefix: str = ""):
     counts = await content_counts()
     text = _card_text(item, counts.get("pending", 0), prefix)
@@ -217,8 +242,11 @@ async def cmd_load(message: Message):
 
 @curator_router.message(Command("curate_reload"))
 async def cmd_reload(message: Message):
-    """Стереть батч и залить заново из curator_data (новая версия призывов)."""
-    if message.from_user.id != settings.tg_admin_id:
+    """Стереть батч и залить заново из curator_data (новая версия призывов).
+
+    Доступно куратору (Алёна) и админу: курирует Алёна — ей и обновлять пачку.
+    Иначе при админ-гейте клик с её аккаунта молча возвращается (как было с /myid)."""
+    if not _is_curator(message.from_user.id):
         return
     await content_wipe_batch(BATCH)
     await curator_set_state(message.from_user.id, None, None)
@@ -300,6 +328,10 @@ async def cmd_export(message: Message):
         # Telegram лимит 4096 — режем по абзацам.
         for part in _split(text, 3800):
             await message.answer(part, parse_mode=None)
+        # Pinterest — досылаем готовые брендовые картинки (по одной на пин).
+        if ch == "pinterest":
+            for it in items:
+                await _send_pin_image(message.bot, message.chat.id, it)
 
 
 @curator_router.message(Command("curate_publish"))
@@ -355,6 +387,9 @@ async def cb_ok(callback: CallbackQuery):
     except Exception:
         pass
     await callback.answer("✅ Беру")
+    # Pinterest: сразу отдаём готовую брендовую картинку из тезиса.
+    if item and item["channel"] == "pinterest":
+        await _send_pin_image(callback.message.bot, callback.message.chat.id, item)
     await _send_next(callback.message.bot, callback.message.chat.id, _cid(callback))
 
 
