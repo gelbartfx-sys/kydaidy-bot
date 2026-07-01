@@ -138,6 +138,12 @@ def _context(user: dict, segment: str) -> str:
     req = user.get("last_ai_request")
     if req:
         bits.append(f"Запрос, вскрытый на встрече: «{req}». Бережно обопрись на него.")
+    dossier = user.get("dossier")
+    if dossier:
+        bits.append(
+            f"ДОСЬЕ (что ты уже знаешь о ней с прошлых встреч): {dossier}. "
+            "Пиши как та, кто её ПОМНИТ — сошлись на конкретное, что она приносила, "
+            "не общими словами. Именно это делает сообщение живым, а не рассылкой.")
     bits.append("Напиши одно личное сообщение под эту ситуацию.")
     return "\n".join(bits)
 
