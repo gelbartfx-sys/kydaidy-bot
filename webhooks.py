@@ -20,6 +20,17 @@ from handlers import _send_povorot_result
 logger = logging.getLogger(__name__)
 
 
+def _to_int(v) -> int:
+    """Безопасный парс числа из вебхука Tribute. Сумма/id могут прийти строкой или
+    десятичной ('990.00') → голый int() бы кинул ValueError → вебхук падал в 500 →
+    Tribute ретраил бесконечно, а админ НЕ уведомлялся (оплата терялась молча).
+    '990.00'→990, мусор/None→0."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _verify_tribute_signature(body: bytes, signature: str) -> bool:
     """Проверка подписи Tribute webhook (HMAC-SHA256, hex, header Trbt-Signature).
 
@@ -118,7 +129,7 @@ def _tribute_product_code(event: str, payload: dict) -> str | None:
         if any(k in name for k in ("воркбук", "манифест 7", "манифест7", "7 повор", "карта")):
             return "manifest_7"
         # неизвестный цифровой продукт — по цене (1:1 дороже воркбука), иначе None (залогируем)
-        amt = int(payload.get("amount") or payload.get("price") or 0)
+        amt = _to_int(payload.get("amount") or payload.get("price") or 0)
         if amt >= settings.manifest_7_price * 2:
             return "manifest_1on1"
         if amt >= settings.manifest_7_price:
@@ -149,8 +160,8 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         # ВСЕГДА логируем сырой payload — чтобы видеть реальные имена продуктов и точно замапить.
         logger.info("Tribute event=%s payload=%s", event, json.dumps(payload, ensure_ascii=False)[:400])
 
-        tg_id = int(payload.get("telegram_user_id") or payload.get("user_telegram_id") or 0)
-        amount = int(payload.get("amount") or payload.get("price") or 0)
+        tg_id = _to_int(payload.get("telegram_user_id") or payload.get("user_telegram_id") or 0)
+        amount = _to_int(payload.get("amount") or payload.get("price") or 0)
         payment_id = str(payload.get("subscription_id") or payload.get("order_id")
                          or payload.get("payment_id") or "")
         code = _tribute_product_code(event, payload)

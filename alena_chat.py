@@ -37,7 +37,7 @@ from database import (
 )
 from alena_persona import (
     build_system, DISCLAIMER, INTRO, CLOSE_MARK, is_crisis, CRISIS_REPLY,
-    extract_request, extract_dossier, extract_score,
+    extract_request, extract_dossier, extract_score, strip_dangling_markers,
 )
 from alena_brain import brain_turn
 from lead_policy import classify
@@ -291,7 +291,13 @@ class _InAlenaFilter(BaseFilter):
     async def __call__(self, message: Message) -> bool:
         if not message.text or message.text.startswith("/"):
             return False
-        return await ai_active_session(message.from_user.id) is not None
+        # Сбой D1-прокси не должен ронять фильтр (иначе исключение = сообщение не
+        # доходит даже до catch-all, тишина для всех). При сбое — не перехватываем.
+        try:
+            return await ai_active_session(message.from_user.id) is not None
+        except Exception:
+            logger.warning("ai_active_session failed in filter (continuing)", exc_info=True)
+            return False
 
 
 async def _generate(history: list[dict], name, povorot, archetype,
@@ -479,6 +485,10 @@ async def _talk(message: Message, text: str):
     # Служебный маркер скоринга (Фаза 1): ВСЕГДА вырезаем из reply до отправки,
     # чтобы [[SCORE ...]] не утёк человеку; сигналы кладём в БД (крэш-сейф).
     reply, score = extract_score(reply)
+    # Финальная зачистка: срезать ЛЮБОЙ обрезанный маркер-огрызок ([[ЗАПРОС/[[ДОСЬЕ/
+    # [[ВСТРЕЧА… без ]]) при обрыве генерации по лимиту токенов — чтобы служебка не
+    # утекла человеку (полные маркеры уже извлечены выше).
+    reply = strip_dangling_markers(reply)
     # v1-путь: скоринг маркером [[SCORE]] в тексте. brain-путь: структурой из диагноза
     # (в reply маркера нет). Берём то, что пришло этим ходом.
     signals = score or brain_signals
@@ -488,12 +498,19 @@ async def _talk(message: Message, text: str):
             heat=signals.get("heat"), open_=signals.get("open"),
             resist=signals.get("resist"), value=signals.get("value"))
     # Трек лида (T1..T4) → колонка lead_track: топливо для /sources, догона и ворот
-    # бюджета кружков. brain отдаёт трек прямо; для v1 выводим из сигналов classify.
-    track = brain_track or (classify(signals) if signals else None)
+    # бюджета кружков. brain отдаёт трек прямо (валидируем против T1-T4 — Haiku мог
+    # выдать мусор); для v1 выводим из сигналов classify.
+    track = brain_track if brain_track in ("T1", "T2", "T3", "T4") else None
+    if not track and signals:
+        track = classify(signals)
     if track:
         await set_lead_track(user.id, track)
     if dossier_new:
         await save_dossier(user.id, dossier_new)
+    # Пустой reply после вырезания маркеров (модель вернула почти одну служебку) →
+    # без фолбэка _send_alive не отправит ничего и не покажет кнопки = «бот умер».
+    if not reply.strip() and not closed:
+        reply = "Я рядом — скажи это чуть иначе, я слушаю."
     await ai_add_message(sid, user.id, "model", reply)
 
     if closed:

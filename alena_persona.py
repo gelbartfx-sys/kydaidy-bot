@@ -37,6 +37,19 @@ _SCORE_KEY = {"ж": "heat", "о": "open", "с": "resist", "ц": "value"}
 # Этот срезает любой висячий «[[SCORE…» до конца строки, чтобы огрызок не утёк.
 _SCORE_DANGLING_RE = re.compile(r"\[\[\s*SCORE\b.*$", re.IGNORECASE | re.DOTALL)
 
+# Общая защита от ЛЮБОГО обрезанного маркера в хвосте: [[ЗАПРОС/[[ДОСЬЕ/[[ВСТРЕЧА…
+# без закрывающих ]] (обрыв генерации по лимиту токенов). Раньше dangling-защита была
+# только у SCORE → огрызок досье/запроса/close мог утечь человеку. Срезает трейлинг
+# «[[…», который не закрылся «]]». Легит-реплика Алёны скобок [[ не содержит.
+_DANGLING_MARKER_RE = re.compile(r"\[\[(?:(?!\]\]).)*$", re.DOTALL)
+
+
+def strip_dangling_markers(text: str) -> str:
+    """Убирает незакрытый служебный маркер в конце reply (полные уже извлекли extract_*)."""
+    if not text:
+        return text
+    return _DANGLING_MARKER_RE.sub("", text).strip()
+
 
 def extract_request(text: str) -> tuple[str, str | None]:
     """Вырезает маркер [[ЗАПРОС: ...]] из ответа. → (текст без маркера, запрос|None)."""

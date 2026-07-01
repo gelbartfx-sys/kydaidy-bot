@@ -401,15 +401,17 @@ async def on_photo(message: Message):
     if tg_id in _generating_shadow:
         await message.answer("Уже рисую твою Тень — секунду, не присылай ещё раз 🕯️")
         return
-    _generating_shadow.add(tg_id)
+    _generating_shadow.add(tg_id)   # лок сразу после check (без await между) → гонка закрыта
 
     a = ARCHETYPES[code]
-    status = await message.answer(
-        f"Рисую твою Тень — *{a['name']}*… Это займёт около минуты. Не закрывай чат 🕯️",
-        parse_mode="Markdown",
-    )
-
+    status = None
     try:
+        # статус-сообщение ВНУТРИ try: если его отправка упадёт (сеть/флуд), finally всё
+        # равно снимет лок (раньше add стоял до try → сбой answer навсегда залипал юзера).
+        status = await message.answer(
+            f"Рисую твою Тень — *{a['name']}*… Это займёт около минуты. Не закрывай чат 🕯️",
+            parse_mode="Markdown",
+        )
         photo_bytes = await _download_selfie(message)
         if not photo_bytes:
             raise RuntimeError("no selfie bytes (photo/document download failed)")
