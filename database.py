@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS users (
     nurture_active INTEGER DEFAULT 0,
     last_nurture_at TIMESTAMP,
     last_ai_request TEXT,
+    dossier TEXT,
+    dossier_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -257,6 +259,10 @@ _RUNTIME_MIGRATIONS = (
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         decided_at TIMESTAMP
     )""",
+    # ── Досье участницы: живой портрет (почему пришла, что болит, запрос, заметки).
+    # AI-Алёна дописывает после каждой встречи; подгружается в её контекст и в вид 1:1.
+    "ALTER TABLE users ADD COLUMN dossier TEXT",
+    "ALTER TABLE users ADD COLUMN dossier_at TIMESTAMP",
 )
 
 
@@ -312,6 +318,21 @@ async def ai_set_last_request(tg_id: int, request: str | None):
         )
     except Exception:
         logger.warning("ai_set_last_request failed (continuing)", exc_info=True)
+
+
+async def save_dossier(tg_id: int, dossier: str | None):
+    """Перезаписать живой портрет участницы (AI-Алёна отдаёт обновлённый целиком).
+
+    Крэш-сейф: нет колонки (миграция не докатилась) — деградируем тихо."""
+    if not dossier:
+        return
+    try:
+        await _exec(
+            "UPDATE users SET dossier = ?, dossier_at = CURRENT_TIMESTAMP WHERE tg_id = ?",
+            (dossier.strip()[:2000], tg_id),
+        )
+    except Exception:
+        logger.warning("save_dossier failed (continuing)", exc_info=True)
 
 
 async def set_user_source(tg_id: int, source: str | None):

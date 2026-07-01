@@ -19,6 +19,10 @@ CLOSE_MARK = "[[ВСТРЕЧА ЗАВЕРШЕНА]]"
 # Вырезается перед отправкой; текст идёт в нативный мост к 1:1.
 REQUEST_RE = re.compile(r"\[\[\s*ЗАПРОС:\s*(.+?)\]\]", re.IGNORECASE | re.DOTALL)
 
+# Маркер досье — модель отдаёт обновлённый портрет участницы (копится в БД).
+# Вырезается перед отправкой; человек его не видит.
+DOSSIER_RE = re.compile(r"\[\[\s*ДОСЬЕ:\s*(.+?)\]\]", re.IGNORECASE | re.DOTALL)
+
 
 def extract_request(text: str) -> tuple[str, str | None]:
     """Вырезает маркер [[ЗАПРОС: ...]] из ответа. → (текст без маркера, запрос|None)."""
@@ -30,6 +34,18 @@ def extract_request(text: str) -> tuple[str, str | None]:
     req = m.group(1).strip().strip("«»\"' .")
     clean = REQUEST_RE.sub("", text).strip()
     return clean, req
+
+
+def extract_dossier(text: str) -> tuple[str, str | None]:
+    """Вырезает маркер [[ДОСЬЕ: ...]] из ответа. → (текст без маркера, портрет|None)."""
+    if not text:
+        return text, None
+    m = DOSSIER_RE.search(text)
+    if not m:
+        return text, None
+    dossier = m.group(1).strip()
+    clean = DOSSIER_RE.sub("", text).strip()
+    return clean, dossier
 
 
 # ── Голос Алёны ───────────────────────────────────────────────────────────────
@@ -129,8 +145,15 @@ INTRO = (
 )
 
 
+DOSSIER_NOTE = f"""ДОСЬЕ (память о ней). Ты ведёшь живой портрет каждой участницы — он копится между встречами и подгружается тебе перед каждой. Если он есть ниже в «ПРО НЕЁ» — опирайся на него: помни, с чем она приходила, что болит, её запрос. Не начинай с чистого листа с той, кого уже знаешь.
+
+В КАЖДОЙ своей реплике последней служебной строкой обнови портрет (человек её не видит, её вырежут):
+[[ДОСЬЕ: 2–4 фразы — почему пришла, что болит, её настоящий запрос, важные факты/цитаты. Обнови и дополни прежний портрет, не теряя того, что уже знала.]]"""
+
+
 def build_system(name: str | None, povorot: int | None,
-                 archetype: dict | None, force_close: bool = False) -> str:
+                 archetype: dict | None, force_close: bool = False,
+                 dossier: str | None = None) -> str:
     ctx = []
     if name:
         ctx.append(f"Её зовут {name}.")
@@ -141,6 +164,8 @@ def build_system(name: str | None, povorot: int | None,
             f"Её ведущая Тень по тесту — «{archetype['name']}» ({archetype['too']}): "
             f"{archetype['essence']} Можешь бережно опереться на это, если уместно."
         )
+    if dossier:
+        ctx.append(f"ЧТО ТЫ УЖЕ ЗНАЕШЬ О НЕЙ (досье, помни это): {dossier}")
     ctx_s = " ".join(ctx) if ctx else "О ней пока ничего не известно — узнавай в разговоре."
 
     close = ""
@@ -154,6 +179,7 @@ def build_system(name: str | None, povorot: int | None,
         ALENA_VOICE,
         KNOWLEDGE_CORE,
         SESSION_ARC,
+        DOSSIER_NOTE,
         CRISIS_NOTE,
         f"ПРО НЕЁ: {ctx_s}{close}",
     ])

@@ -702,6 +702,39 @@ async def show_club(message: Message):
     await message.answer(CLUB_DESCRIPTION, parse_mode="Markdown")
 
 
+@router.message(Command("dossier"))
+async def show_dossier(message: Message):
+    """Админ/Алёна: живой портрет участницы для подготовки к 1:1. /dossier <tg_id>."""
+    if not _is_unlimited(message.from_user):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await message.answer("Формат: /dossier <tg_id>\n(id можно взять из /sources или пинга оплаты)")
+        return
+    tg_id = int(parts[1])
+    u = await get_user(tg_id)
+    if not u:
+        await message.answer("Не нашла такого человека в базе.")
+        return
+    g = lambda k: (u or {}).get(k)
+    lines = [f"🗂️ Досье · {g('first_name') or '—'} · @{g('username') or '—'} · id {tg_id}"]
+    if g("source"):
+        lines.append(f"Пришла: {g('source')}")
+    if g("shadow_dist"):
+        try:
+            a = ARCHETYPES[winner_from_counts(decode_distribution(g("shadow_dist")))]
+            lines.append(f"Тень: {a['name']} ({a['too']})")
+        except Exception:
+            pass
+    if g("povorot"):
+        lines.append(f"Поворот: {g('povorot')}")
+    if g("last_ai_request"):
+        lines.append(f"Настоящий запрос: {g('last_ai_request')}")
+    lines.append("\nПортрет (со встреч с AI-Алёной):\n" +
+                 (g("dossier") or "— пока пусто (встречи ещё не было)"))
+    await message.answer("\n".join(lines), parse_mode=None)
+
+
 @router.message(Command("stop"))
 async def cmd_stop_nurture(message: Message):
     await stop_nurture(message.from_user.id)

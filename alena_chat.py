@@ -28,11 +28,11 @@ from database import (
     get_user, get_active_subscription,
     ai_active_session, ai_total_sessions,
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
-    ai_close_session, ai_set_last_request,
+    ai_close_session, ai_set_last_request, save_dossier,
 )
 from alena_persona import (
     build_system, DISCLAIMER, INTRO, CLOSE_MARK, is_crisis, CRISIS_REPLY,
-    extract_request,
+    extract_request, extract_dossier,
 )
 
 logger = logging.getLogger(__name__)
@@ -268,8 +268,8 @@ class _InAlenaFilter(BaseFilter):
 
 
 async def _generate(history: list[dict], name, povorot, archetype,
-                    force_close: bool) -> str:
-    system = build_system(name, povorot, archetype, force_close)
+                    force_close: bool, dossier: str | None = None) -> str:
+    system = build_system(name, povorot, archetype, force_close, dossier)
     contents = [
         {"role": ("model" if m["role"] == "model" else "user"),
          "parts": [{"text": m["content"]}]}
@@ -325,6 +325,7 @@ async def on_alena_talk(message: Message):
     u = await get_user(user.id)
     povorot = (u or {}).get("povorot")
     shadow = (u or {}).get("shadow_dist")
+    dossier = (u or {}).get("dossier")
     archetype = None
     if shadow:
         counts = decode_distribution(shadow)
@@ -336,7 +337,7 @@ async def on_alena_talk(message: Message):
     history = await ai_get_messages(sid, HISTORY_LIMIT)
 
     try:
-        reply = await _generate(history, user.first_name, povorot, archetype, force_close)
+        reply = await _generate(history, user.first_name, povorot, archetype, force_close, dossier)
     except Exception as e:
         logger.exception(f"alena talk failed for {user.id}: {e}")
         await message.answer(
@@ -349,6 +350,9 @@ async def on_alena_talk(message: Message):
     closed = (CLOSE_MARK in reply) or force_close
     reply = reply.replace(CLOSE_MARK, "").strip()
     reply, request = extract_request(reply)
+    reply, dossier_new = extract_dossier(reply)
+    if dossier_new:
+        await save_dossier(user.id, dossier_new)
     await ai_add_message(sid, user.id, "model", reply)
 
     if closed:
