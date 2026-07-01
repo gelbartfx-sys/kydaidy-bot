@@ -299,9 +299,33 @@ async def on_photo(message: Message):
             render_profile, portrait, dist, message.from_user.first_name)
     except Exception as e:
         logger.exception(f"shadow generation failed for {tg_id} dist={dist}: {e}")
+        # УСТОЙЧИВОСТЬ (01.07): не рвём воронку при сбое картинки (напр. 429-квота Gemini).
+        # Выдаём результат Тени ТЕКСТОМ (архетип статичен, без API) + призыв подписаться + продукты.
+        try:
+            await status.delete()
+        except Exception:
+            pass
         await message.answer(
-            "Что-то пошло не так с рисунком. Попробуй прислать другое фото — "
-            "или напиши @kydaidy."
+            f"🌑 Твоя ведущая Тень — *{a['name']}* _({a['too']})_.\n\n"
+            f"{a.get('tag','')}\n\n{a.get('essence','')}\n\n"
+            "_(Портрет сейчас не нарисовался — перегружены мощности. "
+            "Пришли фото ещё раз чуть позже, и я нарисую твою Тень акварелью.)_",
+            parse_mode="Markdown",
+        )
+        await message.answer(
+            "📿 Я почти каждый день пишу в канал — про Тени, повороты и путь к себе. "
+            "Подпишись, чтобы не потерять дорогу 👇",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📿 Подписаться на канал", url=_CHANNEL_URL)],
+                [InlineKeyboardButton(text="✓ Я подписалась", callback_data="check_sub")],
+            ]),
+        )
+        await message.answer(
+            "Твой архетип — это *Тень*: где ты защищаешься сейчас.\n\n"
+            "Хочешь поговорить про неё начистоту — бесплатная встреча: /alena\n\n"
+            "А вот с чего ещё можно начать ↓",
+            parse_mode="Markdown",
+            reply_markup=_products_menu_keyboard(),
         )
         return
     finally:
