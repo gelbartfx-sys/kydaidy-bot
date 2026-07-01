@@ -410,12 +410,14 @@ async def _talk(message: Message, text: str):
     reply = None
     brain_signals = None      # скоринг из диагноза (brain-путь); в reply маркера нет
     brain_track = None
+    brain_phase = None        # фаза метода из диагноза → триггер закрытия на native_offer
     if settings.brain_v2_enabled:
         try:
             cm = await get_client_model(user.id)
             reply, new_cm, brain_signals, brain_track = await brain_turn(
                 history, user.first_name, archetype, cm)
             await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
+            brain_phase = (new_cm or {}).get("method_phase")
         except Exception as e:
             logger.warning("brain_v2 turn failed for %s → fallback v1: %s", user.id, e,
                            exc_info=True)
@@ -433,7 +435,12 @@ async def _talk(message: Message, text: str):
             )
             return
 
-    closed = (CLOSE_MARK in reply) or force_close
+    # Закрытие встречи → показ оффера Клуба + КНОПКА оплаты Tribute (_after_close).
+    # Триггеры: (1) модель поставила CLOSE_MARK; (2) предохранитель TURN_CAP;
+    # (3) 🔴 мозг дошёл до фазы native_offer — ЖЕЛЕЗНО закрываем, даже если Haiku не
+    # выдал CLOSE_MARK. Без этого коуч питчит Клуб, но ссылку на оплату не даёт
+    # (баг: питч заканчивался вопросом, кнопка не появлялась).
+    closed = (CLOSE_MARK in reply) or force_close or (brain_phase == "native_offer")
     reply = reply.replace(CLOSE_MARK, "").strip()
     reply, request = extract_request(reply)
     reply, dossier_new = extract_dossier(reply)
