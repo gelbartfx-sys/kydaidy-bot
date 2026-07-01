@@ -361,13 +361,15 @@ async def on_photo(message: Message):
                 [InlineKeyboardButton(text="✓ Я подписалась", callback_data="check_sub")],
             ]),
         )
-        await message.answer(
-            "Твой архетип — это *Тень*: где ты защищаешься сейчас.\n\n"
-            "Хочешь поговорить про неё начистоту — бесплатная встреча: /alena\n\n"
-            "А вот с чего ещё можно начать ↓",
-            parse_mode="Markdown",
-            reply_markup=_products_menu_keyboard(),
-        )
+        from alena_chat import open_shadow_session
+        if not await open_shadow_session(message, message.from_user, code):
+            await message.answer(
+                "Твой архетип — это *Тень*: где ты защищаешься сейчас.\n\n"
+                "Хочешь поговорить про неё начистоту — бесплатная встреча: /alena\n\n"
+                "А вот с чего ещё можно начать ↓",
+                parse_mode="Markdown",
+                reply_markup=_products_menu_keyboard(),
+            )
         return
     finally:
         try:
@@ -401,14 +403,18 @@ async def on_photo(message: Message):
             [InlineKeyboardButton(text="✓ Я подписалась", callback_data="check_sub")],
         ]),
     )
-    await message.answer(
-        "Твой архетип — это *Тень*: где ты защищаешься сейчас, в какой маске застряла.\n\n"
-        "Путь сквозь неё — *карта 5 поворотов*. Хочешь поговорить про свою Тень "
-        "начистоту — у меня есть бесплатная встреча: /alena\n\n"
-        "А вот с чего ещё можно начать ↓",
-        parse_mode="Markdown",
-        reply_markup=_products_menu_keyboard(),
-    )
+    # Тёплый авто-контакт: Алёна САМА открывает встречу с хуком под его Тень и
+    # докручивает в Клуб (архетип уже втекает в on_alena_talk). Фолбэк — прежнее меню.
+    from alena_chat import open_shadow_session
+    if not await open_shadow_session(message, message.from_user, code):
+        await message.answer(
+            "Твой архетип — это *Тень*: где ты защищаешься сейчас, в какой маске застряла.\n\n"
+            "Путь сквозь неё — *карта 5 поворотов*. Хочешь поговорить про свою Тень "
+            "начистоту — у меня есть бесплатная встреча: /alena\n\n"
+            "А вот с чего ещё можно начать ↓",
+            parse_mode="Markdown",
+            reply_markup=_products_menu_keyboard(),
+        )
     if not _is_unlimited(message.from_user):
         await mark_shadow_generated(tg_id)
     # Сохраняем распределение Тени — AI-проводник практик адаптируется под него.
