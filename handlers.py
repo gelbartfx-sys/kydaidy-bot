@@ -287,6 +287,22 @@ async def _prompt_shadow_photo(message: Message, dist: str):
     )
 
 
+# Видео-кружки под каждую Тень (file_id готового кружка в Telegram). Пусто = не шлём.
+# Заполняется после продакшна кружков (v8-рецепт): шлём кружок 1 раз → берём file_id → сюда.
+_KRUZHOK_FILE_IDS: dict[str, str] = {}
+
+
+async def _send_shadow_kruzhok(message: Message, code: str):
+    """Видео-кружок Алёны про её Тень (если готов для архетипа). Иначе тихо пропускает."""
+    fid = _KRUZHOK_FILE_IDS.get(code)
+    if not fid:
+        return
+    try:
+        await message.answer_video_note(fid)
+    except Exception:
+        logger.warning("shadow kruzhok send failed for %s", code, exc_info=True)
+
+
 @router.message(F.photo)
 async def on_photo(message: Message):
     """Фото после теста → clean-портрет Тени + разбор + ссылка на полный профиль."""
@@ -353,14 +369,6 @@ async def on_photo(message: Message):
             "Пришли фото ещё раз чуть позже, и я нарисую твою Тень акварелью.)_",
             parse_mode="Markdown",
         )
-        await message.answer(
-            "📿 Я почти каждый день пишу в канал — про Тени, повороты и путь к себе. "
-            "Подпишись, чтобы не потерять дорогу 👇",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📿 Подписаться на канал", url=_CHANNEL_URL)],
-                [InlineKeyboardButton(text="✓ Я подписалась", callback_data="check_sub")],
-            ]),
-        )
         from alena_chat import open_shadow_session
         if not await open_shadow_session(message, message.from_user, code):
             await message.answer(
@@ -385,24 +393,16 @@ async def on_photo(message: Message):
         [InlineKeyboardButton(text="🌑 Открыть в HD / поделиться", url=profile_url)],
     ])
 
+    # Один месседж: портрет + HD-кнопка в подписи. Без лишних сообщений/кнопок —
+    # сразу к живому контакту Алёны (подписку перенесли в конец разговора).
     await message.answer_photo(
         BufferedInputFile(profile_png, filename="arhetip-profil.png"),
-        caption=f"🌑 Твой архетипический профиль · ведущая Тень: {a['name']}",
-    )
-    await message.answer(
-        "Сохрани картинку (зажми → «Сохранить») или открой в высоком качестве "
-        "и поделись — кнопка ниже. Отметишь @kydaidy 🤍",
+        caption=f"🌑 Твой архетипический профиль · ведущая Тень: {a['name']}\n\n"
+                "Сохрани или открой в HD — кнопка ниже.",
         reply_markup=kbd,
     )
-    # рост канала: мягкий, но заметный призыв подписаться (в момент высокого внимания — сразу после портрета)
-    await message.answer(
-        "📿 Я почти каждый день пишу в канал — коротко про Тени, повороты и то, "
-        "как возвращаться к себе. Подпишись, чтобы не потерять дорогу 👇",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📿 Подписаться на канал", url=_CHANNEL_URL)],
-            [InlineKeyboardButton(text="✓ Я подписалась", callback_data="check_sub")],
-        ]),
-    )
+    # Видео-кружок про её Тень (если готов для архетипа) — вовлекающий момент перед хуком.
+    await _send_shadow_kruzhok(message, code)
     # Тёплый авто-контакт: Алёна САМА открывает встречу с хуком под его Тень и
     # докручивает в Клуб (архетип уже втекает в on_alena_talk). Фолбэк — прежнее меню.
     from alena_chat import open_shadow_session

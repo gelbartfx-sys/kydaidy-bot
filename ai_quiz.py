@@ -137,20 +137,23 @@ async def generate_analysis_text(code: str, name: str | None = None,
 def _image_prompt(code: str, clean: bool = False) -> str:
     a = ARCHETYPES[code]
     base = (
-        "Image 1 is a reference photo of a real woman. Create a SINGLE vertical "
-        "illustration (portrait, ~2:3) with HER as the archetype.\n\n"
+        "Image 1 is a photo of a REAL person. Paint a SINGLE vertical portrait (~2:3) of "
+        "THIS EXACT person — it MUST clearly look like them: keep their real face, face "
+        "shape, features, eyes, nose, mouth, hair, skin tone and any facial hair exactly "
+        "as in Image 1. Do NOT invent a new face, do NOT change gender, do NOT swap them "
+        "for a different person. The likeness to Image 1 is the top priority.\n\n"
         "STYLE: atmospheric Poetcore watercolour on dark-toned textured paper. Deep, "
         "moody, earthy palette — charcoal, deep forest green, oxblood/burgundy, muted "
         "gold candle-light, smoky shadows. Hand-painted, soft bleeding edges, visible "
         "paper grain, fine ink linework. A dark literary illustrated page — NOT "
         "photorealistic, NOT glossy, NOT horror/gore, NOT pink/cute. Beautiful and "
-        "shadowy, dignified.\n\n"
-        "HEROINE: render the woman from Image 1 as a watercolour character — preserve her "
-        "recognisable likeness (face shape, hair, features) but fully painted, in shadow "
-        "and candle/moonlight. She embodies the archetype with quiet power, never a "
-        "glamour or beauty shot.\n\n"
-        f"ARCHETYPE — «{a['name']}» ({a['too']}): {a['scene']}. "
-        f"Emotional mood: {a['mood']}.\n\n"
+        "shadowy, dignified. Paint THEIR real face in this style — a portrait of them, "
+        "never a glamour or beauty shot.\n\n"
+        f"ARCHETYPE «{a['name']}» ({a['too']}) — use ONLY as mood, lighting, pose and "
+        f"background, NOT to replace the face. Atmosphere/mood: {a['mood']}. Setting cues "
+        f"(background and lighting only, keep the person's own face front and centre): "
+        f"{a['scene']}.\n\n"
+        "If Image 1 and the archetype ever conflict, the real face from Image 1 wins.\n\n"
     )
     if clean:
         return base + (

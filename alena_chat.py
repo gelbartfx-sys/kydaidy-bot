@@ -279,9 +279,10 @@ async def _generate(history: list[dict], name, povorot, archetype,
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": contents,
         "generationConfig": {
-            "temperature": 0.85,
-            "maxOutputTokens": 900,
-            "thinkingConfig": {"thinkingBudget": 0},
+            "temperature": 0.9,
+            "maxOutputTokens": 1600,
+            # Мышление ВКЛючено (было 0) — глубже видит узор, ведёт умнее, доходит до продажи.
+            "thinkingConfig": {"thinkingBudget": 2048},
         },
     }
     url = f"{BASE}/models/{TEXT_MODEL}:generateContent?key={settings.gemini_key}"
