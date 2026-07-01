@@ -126,6 +126,11 @@ def _split_source(args: str) -> tuple[str, str | None]:
         tag = _norm_any(tail)
         if tag:
             return core, tag
+        # Хвост после __ не распознан как источник (кривой/длиннее 32) — НО core может
+        # быть валидным функц. deep-link (s_/shadow_/povorot). Не теряем сам линк:
+        # отдаём core, метку роняем. Иначе длинная метка убивала вход в тест Тени.
+        if core.startswith(_FUNC_PREFIXES):
+            return core, None
     bare = _norm_any(args)
     if bare:
         return "", bare
@@ -139,6 +144,11 @@ router = Router()
 # In-memory: генерация идёт сразу после фото в той же сессии; переживать рестарт
 # Render free не требуется (если потеряется — бот мягко попросит пройти тест заново).
 _pending_shadow: dict[int, str] = {}
+
+# tg_id, для которых портрет Тени сейчас генерится (дорогой вызов Gemini ~60с).
+# Гейт лимита проставляется ПОСЛЕ генерации → без этого лока два селфи подряд
+# проходят гейт и запускают 2× генерацию (утечка квоты/денег). Держим, пока рисуем.
+_generating_shadow: set[int] = set()
 
 # --- рост ТГ-канала: подписка ---
 _CHANNEL = settings.tg_channel_id                       # "@kydaidy" (для getChatMember)
@@ -323,6 +333,25 @@ async def _send_shadow_kruzhok(message: Message, code: str) -> bool:
         return False
 
 
+async def _download_selfie(message: Message) -> bytes | None:
+    """Байты селфи: сжатое фото ИЛИ документ-картинка (десктоп «отправить без сжатия»).
+    Раньше ловили только F.photo → селфи-файлом молча падало в fallback (потеря лида)."""
+    src = None
+    if message.photo:
+        src = message.photo[-1]
+    elif message.document and (message.document.mime_type or "").startswith("image/"):
+        src = message.document
+    if src is None:
+        return None
+    try:
+        buf = io.BytesIO()
+        await message.bot.download(src, destination=buf)
+        return buf.getvalue()
+    except Exception:
+        logger.warning("selfie download failed for %s", message.from_user.id, exc_info=True)
+        return None
+
+
 @router.message(F.photo)
 async def on_photo(message: Message):
     """Фото после теста → clean-портрет Тени + разбор + ссылка на полный профиль."""
@@ -357,7 +386,23 @@ async def on_photo(message: Message):
         await message.answer("Сейчас рисунок недоступен. Напиши @kydaidy — поможем вручную.")
         return
 
-    code = winner_from_counts(decode_distribution(dist))
+    # #6: битый/старый dist из БД → decode None → без этой проверки winner_from_counts(None)
+    # роняет хендлер и юзер получает тишину. Мягко зовём перепройти тест.
+    counts = decode_distribution(dist)
+    if not counts:
+        await message.answer(
+            "Кажется, результат теста потерялся 🙏 Пройди его ещё раз и пришли фото следом: "
+            "https://kydaidy.com/shadow")
+        _pending_shadow.pop(tg_id, None)
+        return
+    code = winner_from_counts(counts)
+
+    # #2: лок против гонки двух селфи (гейт лимита ставится только после ~60с генерации).
+    if tg_id in _generating_shadow:
+        await message.answer("Уже рисую твою Тень — секунду, не присылай ещё раз 🕯️")
+        return
+    _generating_shadow.add(tg_id)
+
     a = ARCHETYPES[code]
     status = await message.answer(
         f"Рисую твою Тень — *{a['name']}*… Это займёт около минуты. Не закрывай чат 🕯️",
@@ -365,9 +410,9 @@ async def on_photo(message: Message):
     )
 
     try:
-        buf = io.BytesIO()
-        await message.bot.download(message.photo[-1], destination=buf)
-        photo_bytes = buf.getvalue()
+        photo_bytes = await _download_selfie(message)
+        if not photo_bytes:
+            raise RuntimeError("no selfie bytes (photo/document download failed)")
 
         portrait = await generate_hero_image(
             photo_bytes, code, clean=True, api_key=settings.gemini_key)
@@ -401,6 +446,7 @@ async def on_photo(message: Message):
             )
         return
     finally:
+        _generating_shadow.discard(tg_id)   # #2: снять лок генерации (успех/ошибка)
         try:
             await status.delete()
         except Exception:
@@ -426,8 +472,15 @@ async def on_photo(message: Message):
     kruzhok_shown = await _send_shadow_kruzhok(message, code)
     # Тёплый авто-контакт: Алёна САМА открывает встречу с хуком под его Тень и
     # докручивает в Клуб. Если кружок уже показал Тень — текстовый хук сокращаем.
+    # #5: портрет уже доставлен — сбой открытия встречи (напр. запись сессии в D1)
+    # НЕ должен ронять хендлер и оставлять юзера без опенера/лимита. Ловим → фолбэк-меню.
     from alena_chat import open_shadow_session
-    if not await open_shadow_session(message, message.from_user, code, video_hook=kruzhok_shown):
+    try:
+        opened = await open_shadow_session(message, message.from_user, code, video_hook=kruzhok_shown)
+    except Exception:
+        logger.warning("open_shadow_session failed for %s (fallback menu)", tg_id, exc_info=True)
+        opened = False
+    if not opened:
         await message.answer(
             "Твой архетип — это *Тень*: где ты защищаешься сейчас, в какой маске застряла.\n\n"
             "Путь сквозь неё — *карта 5 поворотов*. Хочешь поговорить про свою Тень "
@@ -444,6 +497,17 @@ async def on_photo(message: Message):
     except Exception:
         logger.warning(f"save_shadow_dist failed for {tg_id}", exc_info=True)
     _pending_shadow.pop(tg_id, None)
+
+
+@router.message(F.document)
+async def on_document(message: Message):
+    """#1: селфи, присланное ФАЙЛОМ (десктоп «отправить без сжатия») — частый кейс.
+    Картинка-документ → тот же путь портрета Тени; не картинка → обычный fallback."""
+    mime = (message.document.mime_type or "") if message.document else ""
+    if mime.startswith("image/"):
+        await on_photo(message)
+    else:
+        await fallback(message)
 
 
 @router.message(CommandStart())

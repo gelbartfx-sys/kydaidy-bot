@@ -346,6 +346,23 @@ async def _typing(message):
         pass
 
 
+async def _keep_typing(message, stop: "asyncio.Event"):
+    """Держит индикатор «печатает…» живым, пока Алёна думает.
+
+    Telegram гасит send_chat_action через ~5с. Мозг v2 (Opus + adaptive thinking)
+    может считать 15-40с — без переотправки юзер видит тишину и решает, что бот умер.
+    Пере-пингуем каждые ~4с до сигнала stop. Крэш-сейф, никогда не роняет ход."""
+    try:
+        while not stop.is_set():
+            await _typing(message)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=4.0)
+            except asyncio.TimeoutError:
+                pass
+    except Exception:
+        pass
+
+
 async def _send_alive(message, text: str, reply_markup=None):
     """Ответ Алёны «вживую»: печатает → пауза → приходит несколькими репликами."""
     bubbles = _split_bubbles(text)
@@ -382,7 +399,12 @@ async def _talk(message: Message, text: str):
 
     await ai_bump_turns(sid)
 
-    if not settings.gemini_key:
+    # Устойчивость к смерти ключа: текстовый ответ может дать мозг v2 (Anthropic) ИЛИ
+    # v1 (Gemini). Блокируем встречу ТОЛЬКО если НИ ОДИН путь недоступен — раньше гард
+    # рубил встречу без Gemini, даже когда мозг на Anthropic жив (Gemini-квота уже
+    # падала в истории проекта → встречи молча умирали). Если мозг упадёт в рантайме
+    # без Gemini-фолбэка — сработает try/except ниже с мягким сообщением.
+    if not settings.gemini_key and not settings.brain_v2_enabled:
         await message.answer(
             "Я тебя услышала. Сейчас не могу ответить развёрнуто — напиши @kydaidy.",
             parse_mode=None,
@@ -403,7 +425,10 @@ async def _talk(message: Message, text: str):
     force_close = turns >= TURN_CAP
     history = await ai_get_messages(sid, HISTORY_LIMIT)
 
-    await _typing(message)  # «печатает…» пока Алёна думает — эффект живого присутствия
+    # «печатает…» живёт всё время генерации (мозг Opus+thinking = 15-40с, одиночный
+    # индикатор гаснет через 5с). Гасим в finally — на любом выходе, включая ошибку.
+    _stop_typing = asyncio.Event()
+    _typer = asyncio.create_task(_keep_typing(message, _stop_typing))
 
     # Мозг v2 (Фаза 1 ядра) — ТОЛЬКО за флагом. При OFF путь v1 нетронут.
     # Если brain_turn упал — фолбэк на v1 в том же ходе (try/except).
@@ -411,29 +436,36 @@ async def _talk(message: Message, text: str):
     brain_signals = None      # скоринг из диагноза (brain-путь); в reply маркера нет
     brain_track = None
     brain_phase = None        # фаза метода из диагноза → триггер закрытия на native_offer
-    if settings.brain_v2_enabled:
-        try:
-            cm = await get_client_model(user.id)
-            reply, new_cm, brain_signals, brain_track = await brain_turn(
-                history, user.first_name, archetype, cm)
-            await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
-            brain_phase = (new_cm or {}).get("method_phase")
-        except Exception as e:
-            logger.warning("brain_v2 turn failed for %s → fallback v1: %s", user.id, e,
-                           exc_info=True)
-            reply = None  # → фолбэк ниже на v1-путь
+    try:
+        if settings.brain_v2_enabled:
+            try:
+                cm = await get_client_model(user.id)
+                reply, new_cm, brain_signals, brain_track = await brain_turn(
+                    history, user.first_name, archetype, cm)
+                await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
+                brain_phase = (new_cm or {}).get("method_phase")
+            except Exception as e:
+                logger.warning("brain_v2 turn failed for %s → fallback v1: %s", user.id, e,
+                               exc_info=True)
+                reply = None  # → фолбэк ниже на v1-путь
 
-    if reply is None:
+        if reply is None:
+            try:
+                reply = await _generate(history, user.first_name, povorot, archetype, force_close, dossier)
+            except Exception as e:
+                logger.exception(f"alena talk failed for {user.id}: {e}")
+                await message.answer(
+                    "Я тут — но прямо сейчас ответить не получается. "
+                    "Попробуй чуть позже или напиши @kydaidy.",
+                    parse_mode=None,
+                )
+                return
+    finally:
+        _stop_typing.set()
         try:
-            reply = await _generate(history, user.first_name, povorot, archetype, force_close, dossier)
-        except Exception as e:
-            logger.exception(f"alena talk failed for {user.id}: {e}")
-            await message.answer(
-                "Я тут — но прямо сейчас ответить не получается. "
-                "Попробуй чуть позже или напиши @kydaidy.",
-                parse_mode=None,
-            )
-            return
+            await _typer
+        except Exception:
+            pass
 
     # Закрытие встречи → показ оффера Клуба + КНОПКА оплаты Tribute (_after_close).
     # Триггеры: (1) модель поставила CLOSE_MARK; (2) предохранитель TURN_CAP;
