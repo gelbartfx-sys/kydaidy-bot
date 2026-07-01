@@ -73,12 +73,13 @@ PRODUCT_BUY_URLS = {
 SOURCE_TAGS = {
     "threads", "pin", "pinterest", "dzen", "zen", "video", "reels", "shorts",
     "tg", "telegram", "ig", "inst", "instagram", "yt", "youtube", "vk", "site",
-    "bio", "rutube",
+    "bio", "rutube", "tiktok", "tt",
 }
 # Нормализация синонимов к одному имени канала.
 _SOURCE_ALIAS = {
     "pin": "pinterest", "zen": "dzen", "inst": "instagram", "ig": "instagram",
     "yt": "youtube", "tg": "telegram", "reels": "video", "shorts": "video",
+    "tt": "tiktok",
 }
 
 
