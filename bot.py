@@ -29,6 +29,7 @@ from handlers import router
 from manifest7_guide import guide_router
 from alena_chat import alena_router
 from curator import curator_router, push_daily_batch, publish_tick
+from growth_agent import growth_router, run_growth_tick
 from nurture import run_nurture_tick
 from webhooks import setup_webhooks
 
@@ -101,6 +102,9 @@ async def main():
     dp.include_router(curator_router)
     dp.include_router(alena_router)
     dp.include_router(guide_router)
+    # growth_router — только callback-кнопки ревью реактивации (без текст-фильтров,
+    # конфликтов с catch-all не создаёт). После основного router тоже ок.
+    dp.include_router(growth_router)
     dp.include_router(router)
 
     # Запуск nurture-tick каждый час
@@ -114,6 +118,11 @@ async def main():
     scheduler.add_job(
         publish_tick, "interval",
         minutes=settings.curator_publish_every_min, args=[bot])
+    # Hermes-руки: дневной тик реактивации. Сам джоб no-op, пока
+    # growth_agent_enabled=False — кандидаты не набираются, никому ничего не шлётся.
+    scheduler.add_job(
+        run_growth_tick, "interval",
+        hours=settings.growth_tick_hours, args=[bot])
     scheduler.start()
 
     # Webhook server (для Tally + Tribute)

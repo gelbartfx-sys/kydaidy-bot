@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 from aiogram import Router, F
-from aiogram.filters import Command, BaseFilter
+from aiogram.filters import Command, CommandObject, BaseFilter
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     BufferedInputFile,
@@ -30,7 +30,7 @@ from aiogram.types import (
 
 from config import settings
 from ai_quiz import BASE, TEXT_MODEL
-from curator_data import BATCH, ITEMS
+from curator_data import BATCH, ITEMS, BATCHES
 from database import (
     content_batch_size, content_add_item, content_get_item,
     content_next_pending, content_set_final, content_decide, content_defer,
@@ -49,6 +49,25 @@ CHANNEL_LABEL = {
 
 # Каналы, которые бот публикует сам. Прочие — ручной экспорт (/curate_export).
 AUTOPOST_CHANNELS = {"telegram"}
+
+
+def _resolve_batch(arg: str | None):
+    """Аргумент команды → (имя_батча, items, offset_позиций).
+
+    Принимает алиас («b2»), точное имя («2026-06-22-batch-02») или пусто (→ b1,
+    активный батч). offset разносит батчи по позициям, чтобы в общей очереди /curate
+    они шли по порядку загрузки (b1 → b2 → …), а не вперемешку."""
+    key = (arg or "").strip().lower() or "b1"
+    order = list(BATCHES.keys())
+    # алиас
+    if key in BATCHES:
+        name, items = BATCHES[key]
+        return name, items, order.index(key) * 1000
+    # точное имя батча
+    for i, (k, (name, items)) in enumerate(BATCHES.items()):
+        if name == key:
+            return name, items, i * 1000
+    return None, None, 0
 
 
 def _is_curator(uid: int) -> bool:
@@ -160,26 +179,41 @@ def _card_text(item: dict, pending: int, prefix: str = "") -> str:
 
 
 async def _send_pin_image(bot, chat_id: int, item: dict, caption: str | None = None):
-    """Рендер брендового пина из тезиса и отправка картинкой. Тихо пропускаем при сбое."""
+    """Готовый пин в стиле Алёны (фото со стока + белый моно-текст) + ссылка на тест.
+
+    Фото-стиль по умолчанию; если фон со стока не пришёл (нет PEXELS_API_KEY или
+    пусто) — откат на типографский пин. Тихо пропускаем при полном сбое."""
+    from pin_image import render_pin, render_pin_photo, photo_query, pin_link
+    import pexels
+    thesis = item.get("final") or item.get("draft") or ""
+    fmt, ext, cta = item.get("fmt"), item.get("ext_id"), item.get("cta")
+    png = None
     try:
-        from pin_image import render_pin
-        png = render_pin(
-            item.get("final") or item.get("draft") or "",
-            item.get("fmt"), item.get("ext_id"))
+        bg = await pexels.fetch_background(photo_query(item.get("visual"), thesis))
+        if bg:
+            png = render_pin_photo(thesis, bg, fmt, ext, cta=cta)
     except Exception:
-        logger.exception("pin render failed for %s", item.get("ext_id"))
-        return False
-    cap = caption if caption is not None else f"📌 Пин {item.get('ext_id')} — готов для Pinterest"
-    if item.get("cta") and caption is None:
-        cap += f"\n➡️ {item['cta']}"
+        logger.exception("photo pin failed for %s — fallback typographic", ext)
+    if png is None:
+        try:
+            png = render_pin(thesis, fmt, ext, cta=cta)
+        except Exception:
+            logger.exception("pin render failed for %s", ext)
+            return False
+    link = pin_link(ext)
+    if caption is not None:
+        cap = caption
+    else:
+        cap = (f"📌 Пин {ext} — готов для Pinterest\n"
+               f"🔗 ссылка пина (вставь в поле «ссылка» при публикации):\n{link}")
     try:
         await bot.send_photo(
             chat_id,
-            BufferedInputFile(png, filename=f"pin_{item.get('ext_id')}.png"),
+            BufferedInputFile(png, filename=f"pin_{ext}.png"),
             caption=cap, parse_mode=None)
         return True
     except Exception:
-        logger.exception("pin send failed for %s", item.get("ext_id"))
+        logger.exception("pin send failed for %s", ext)
         return False
 
 
@@ -191,7 +225,9 @@ async def _send_card(bot_or_msg, chat_id: int, item: dict, prefix: str = ""):
 
 
 async def _send_next(bot, chat_id: int, curator_id: int):
-    item = await content_next_pending(BATCH)
+    # Без фильтра по батчу: курируем следующий pending по всем загруженным батчам
+    # (по position, затем id). Батчи разнесены по offset в _resolve_batch.
+    item = await content_next_pending()
     if not item:
         c = await content_counts()
         await curator_set_state(curator_id, None, None)
@@ -224,36 +260,52 @@ async def cmd_myid(message: Message):
 
 
 @curator_router.message(Command("curate_load"))
-async def cmd_load(message: Message):
+async def cmd_load(message: Message, command: CommandObject):
+    """Загрузить батч. /curate_load — активный (b1); /curate_load b2 — следующий."""
     if not _is_curator(message.from_user.id):
         return
-    existing = await content_batch_size(BATCH)
+    name, items, offset = _resolve_batch(command.args)
+    if not name:
+        await message.answer(
+            f"Не знаю такой батч. Доступны: {', '.join(BATCHES.keys())}.",
+            parse_mode=None)
+        return
+    existing = await content_batch_size(name)
     if existing:
         await message.answer(
-            f"Батч «{BATCH}» уже загружен: {existing} единиц. "
+            f"Батч «{name}» уже загружен: {existing} единиц. "
             "Курировать — /curate.", parse_mode=None)
         return
-    for pos, (ext_id, channel, fmt, hyp, draft, visual, cta) in enumerate(ITEMS):
-        await content_add_item(BATCH, ext_id, channel, fmt, hyp, draft, visual, cta, pos)
+    for pos, (ext_id, channel, fmt, hyp, draft, visual, cta) in enumerate(items):
+        await content_add_item(name, ext_id, channel, fmt, hyp, draft, visual, cta,
+                               offset + pos)
     await message.answer(
-        f"Загрузила батч «{BATCH}»: {len(ITEMS)} единиц.\nНачать курировать — /curate.",
+        f"Загрузила батч «{name}»: {len(items)} единиц.\nНачать курировать — /curate.",
         parse_mode=None)
 
 
 @curator_router.message(Command("curate_reload"))
-async def cmd_reload(message: Message):
+async def cmd_reload(message: Message, command: CommandObject):
     """Стереть батч и залить заново из curator_data (новая версия призывов).
+    /curate_reload — активный (b1); /curate_reload b2 — конкретный батч.
 
     Доступно куратору (Алёна) и админу: курирует Алёна — ей и обновлять пачку.
     Иначе при админ-гейте клик с её аккаунта молча возвращается (как было с /myid)."""
     if not _is_curator(message.from_user.id):
         return
-    await content_wipe_batch(BATCH)
+    name, items, offset = _resolve_batch(command.args)
+    if not name:
+        await message.answer(
+            f"Не знаю такой батч. Доступны: {', '.join(BATCHES.keys())}.",
+            parse_mode=None)
+        return
+    await content_wipe_batch(name)
     await curator_set_state(message.from_user.id, None, None)
-    for pos, (ext_id, channel, fmt, hyp, draft, visual, cta) in enumerate(ITEMS):
-        await content_add_item(BATCH, ext_id, channel, fmt, hyp, draft, visual, cta, pos)
+    for pos, (ext_id, channel, fmt, hyp, draft, visual, cta) in enumerate(items):
+        await content_add_item(name, ext_id, channel, fmt, hyp, draft, visual, cta,
+                               offset + pos)
     await message.answer(
-        f"Перезалила батч «{BATCH}»: {len(ITEMS)} единиц (новые призывы). "
+        f"Перезалила батч «{name}»: {len(items)} единиц (новые призывы). "
         "Курировать — /curate.", parse_mode=None)
 
 
@@ -262,7 +314,8 @@ async def cmd_curate(message: Message):
     uid = message.from_user.id
     if not _is_curator(uid):
         return
-    if await content_batch_size(BATCH) == 0:
+    c = await content_counts()
+    if sum(c.values()) == 0:
         await message.answer(
             "Батч ещё не загружен. Сначала /curate_load.", parse_mode=None)
         return
@@ -295,8 +348,15 @@ async def cmd_status(message: Message):
     c = await content_counts()
     q = await pq_counts()
     qline = ", ".join(f"{k}: {v}" for k, v in q.items()) or "пусто"
+    # Размер каждого загруженного батча (чтобы видеть, что b2 подгружен).
+    batch_lines = []
+    for key, (name, _items) in BATCHES.items():
+        n = await content_batch_size(name)
+        if n:
+            batch_lines.append(f"  • {key}: {n}")
+    bl = ("\nЗагружены батчи:\n" + "\n".join(batch_lines)) if batch_lines else ""
     await message.answer(
-        f"Батч «{BATCH}»\n"
+        f"Контент-конвейер (все батчи){bl}\n"
         f"⏳ pending: {c.get('pending', 0)}\n"
         f"✅ approved: {c.get('approved', 0)}\n"
         f"❌ rejected: {c.get('rejected', 0)}\n"
@@ -315,15 +375,21 @@ async def cmd_export(message: Message):
     by_ch: dict[str, list] = {}
     for r in rows:
         by_ch.setdefault(r["channel"], []).append(r)
+    from pin_image import pin_link
     for ch, items in by_ch.items():
         label = CHANNEL_LABEL.get(ch, ch)
         chunk = [f"=== {label} ({len(items)}) ==="]
+        if ch == "pinterest":
+            chunk.append("🔗 ссылку вставляй в поле «ссылка/сайт» пина при публикации "
+                         "(в описании она некликабельна). Ведёт на тест Тени.")
         for it in items:
             chunk.append(f"\n— {it['ext_id']} ({it.get('fmt')}):\n{it.get('final') or it.get('draft')}")
             if it.get("visual"):
                 chunk.append(f"🎨 {it['visual']}")
             if it.get("cta"):
                 chunk.append(f"➡️ CTA: {it['cta']}")
+            if ch == "pinterest":
+                chunk.append(f"🔗 ссылка пина: {pin_link(it['ext_id'])}")
         text = "\n".join(chunk)
         # Telegram лимит 4096 — режем по абзацам.
         for part in _split(text, 3800):
@@ -544,7 +610,7 @@ async def push_daily_batch(bot):
     today = datetime.now(_tz()).strftime("%Y-%m-%d")
     if state and state.get("last_pushed_date") == today:
         return  # сегодня уже слали
-    item = await content_next_pending(BATCH)
+    item = await content_next_pending()  # все загруженные батчи
     if not item:
         return  # курировать нечего
     await curator_mark_pushed(cid, today)

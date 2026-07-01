@@ -53,5 +53,14 @@ class Settings(BaseSettings):
     curator_tz: str = "Europe/Moscow"
     curator_publish_every_min: int = 45  # как часто сливать одобренное в TG-канал
 
+    # ── Hermes-руки: реактивация застрявших лидов ────────────────────────────
+    # OFF by default. Включается только когда Кай явно захочет (env GROWTH_AGENT_ENABLED=1).
+    # Режим всегда «ревью»: бот не шлёт юзерам сам — генерит персональный нудж,
+    # отправляет Каю (tg_admin_id) на одобрение кнопкой, по ✅ — бот шлёт юзеру.
+    growth_agent_enabled: bool = False
+    growth_daily_limit: int = 5        # сколько черновиков готовить за один прогон
+    growth_cooldown_days: int = 21     # не трогать одного юзера чаще, чем раз в N дней
+    growth_tick_hours: int = 24        # период джоба реактивации
+
 
 settings = Settings()

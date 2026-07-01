@@ -67,6 +67,7 @@ def _menu_keyboard(done: set[int]) -> InlineKeyboardMarkup:
             text=f"{mark}{n}. {p['title']} · {p['duration']}",
             callback_data=f"g:open:{n}",
         )])
+    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -110,7 +111,8 @@ async def _send_step(message: Message, tg_id: int, n: int, step: int):
     if step >= len(steps):  # дошли до конца → closing
         await guide_complete(tg_id, n)
         kbd = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="к списку практик", callback_data="g:menu")],
+            [InlineKeyboardButton(text="← К списку практик", callback_data="g:menu")],
+            [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")],
         ])
         await message.answer(p["closing"], reply_markup=kbd)
         return
@@ -158,7 +160,8 @@ async def cb_next(callback: CallbackQuery):
 @guide_router.callback_query(F.data == "g:pause")
 async def cb_pause(callback: CallbackQuery):
     kbd = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="к списку практик", callback_data="g:menu")],
+        [InlineKeyboardButton(text="← К списку практик", callback_data="g:menu")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")],
     ])
     await callback.message.answer(
         "Хорошо. Я сохранила, где ты. Вернёшься — продолжим с этого места.\n\n— Алёна",
@@ -265,5 +268,7 @@ async def on_guide_talk(message: Message):
 
     kbd = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="продолжить практику →", callback_data=f"g:open:{n}")],
+        [InlineKeyboardButton(text="← К списку практик", callback_data="g:menu"),
+         InlineKeyboardButton(text="🏠 Меню", callback_data="menu")],
     ])
     await message.answer(reply, parse_mode=None, reply_markup=kbd)
