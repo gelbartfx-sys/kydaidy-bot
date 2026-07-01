@@ -50,6 +50,13 @@ CREATE TABLE IF NOT EXISTS users (
     last_ai_request TEXT,
     dossier TEXT,
     dossier_at TIMESTAMP,
+    lead_heat INTEGER,
+    lead_open INTEGER,
+    lead_resist INTEGER,
+    lead_value INTEGER,
+    lead_track TEXT,
+    circle_credits_spent INTEGER DEFAULT 0,
+    lead_updated_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -269,6 +276,19 @@ _RUNTIME_MIGRATIONS = (
     # NULL => ещё не слали. Существующий прод-D1 уже имеет ai_sessions без неё —
     # ALTER докатывает; «duplicate column» после первого прогона ловит try/except.
     "ALTER TABLE ai_sessions ADD COLUMN nudged_at TIMESTAMP",
+    # ── Скоринг лида (Фаза 1 AI-Алёны): «мозг» без изменения поведения.
+    # Алёна каждый ход скрыто оценивает собеседника (маркер [[SCORE ...]]),
+    # сигналы копятся здесь; чистая политика треков считается в lead_policy.py.
+    # 4 сигнала (0–3), текущий трек, и леджер потраченных HeyGen-кредитов на
+    # персональные кружки (Фаза 2). ALTER «duplicate column» после первого
+    # прогона ловит try/except в init_db — деградирует только эта фича.
+    "ALTER TABLE users ADD COLUMN lead_heat INTEGER",
+    "ALTER TABLE users ADD COLUMN lead_open INTEGER",
+    "ALTER TABLE users ADD COLUMN lead_resist INTEGER",
+    "ALTER TABLE users ADD COLUMN lead_value INTEGER",
+    "ALTER TABLE users ADD COLUMN lead_track TEXT",
+    "ALTER TABLE users ADD COLUMN circle_credits_spent INTEGER DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN lead_updated_at TIMESTAMP",
 )
 
 
@@ -339,6 +359,80 @@ async def save_dossier(tg_id: int, dossier: str | None):
         )
     except Exception:
         logger.warning("save_dossier failed (continuing)", exc_info=True)
+
+
+# ── Скоринг лида (Фаза 1): сигналы собеседника + леджер кредитов ──────────────
+# Всё крэш-сейф: любая ошибка (нет колонки — миграция не докатилась) деградирует
+# ТОЛЬКО скоринг, не роняя встречу.
+
+def _clamp03(v):
+    """0..3 или None (None => поле не трогаем в UPDATE)."""
+    if v is None:
+        return None
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(3, v))
+
+
+async def save_lead_signals(tg_id: int, heat=None, open_=None,
+                            resist=None, value=None):
+    """Записать сигналы лида. Клампим 0..3; None-поля НЕ перезаписываем
+    (COALESCE-семантика: обновляем только переданные не-None). Крэш-сейф."""
+    h, o, r, val = (_clamp03(heat), _clamp03(open_),
+                    _clamp03(resist), _clamp03(value))
+    if h is None and o is None and r is None and val is None:
+        return
+    try:
+        await _exec(
+            "UPDATE users SET "
+            "lead_heat = COALESCE(?, lead_heat), "
+            "lead_open = COALESCE(?, lead_open), "
+            "lead_resist = COALESCE(?, lead_resist), "
+            "lead_value = COALESCE(?, lead_value), "
+            "lead_updated_at = CURRENT_TIMESTAMP "
+            "WHERE tg_id = ?",
+            (h, o, r, val, tg_id),
+        )
+    except Exception:
+        logger.warning("save_lead_signals failed (continuing)", exc_info=True)
+
+
+async def get_lead_signals(tg_id: int):
+    """Текущие сигналы лида + circle_credits_spent + lead_track. → dict | None.
+    Крэш-сейф: при отсутствии колонок вернём None."""
+    try:
+        return await _exec(
+            "SELECT lead_heat, lead_open, lead_resist, lead_value, lead_track, "
+            "circle_credits_spent, lead_updated_at FROM users WHERE tg_id = ?",
+            (tg_id,), fetch="one")
+    except Exception:
+        logger.warning("get_lead_signals failed (continuing)", exc_info=True)
+        return None
+
+
+async def add_circle_credits(tg_id: int, credits: int):
+    """Леджер: прибавить потраченные HeyGen-кредиты на кружки этому лиду.
+    Крэш-сейф."""
+    try:
+        await _exec(
+            "UPDATE users SET "
+            "circle_credits_spent = COALESCE(circle_credits_spent, 0) + ? "
+            "WHERE tg_id = ?",
+            (int(credits), tg_id),
+        )
+    except Exception:
+        logger.warning("add_circle_credits failed (continuing)", exc_info=True)
+
+
+async def set_lead_track(tg_id: int, track: str):
+    """Назначить текущий трек лида ('T1'/'T2'/'T3'/'T4'). Крэш-сейф."""
+    try:
+        await _exec(
+            "UPDATE users SET lead_track = ? WHERE tg_id = ?", (track, tg_id))
+    except Exception:
+        logger.warning("set_lead_track failed (continuing)", exc_info=True)
 
 
 async def set_user_source(tg_id: int, source: str | None):

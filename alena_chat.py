@@ -32,11 +32,11 @@ from database import (
     ai_active_session, ai_total_sessions,
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
     ai_close_session, ai_set_last_request, save_dossier,
-    ai_stale_sessions, ai_mark_nudged,
+    ai_stale_sessions, ai_mark_nudged, save_lead_signals,
 )
 from alena_persona import (
     build_system, DISCLAIMER, INTRO, CLOSE_MARK, is_crisis, CRISIS_REPLY,
-    extract_request, extract_dossier,
+    extract_request, extract_dossier, extract_score,
 )
 
 logger = logging.getLogger(__name__)
@@ -416,6 +416,14 @@ async def _talk(message: Message, text: str):
     reply = reply.replace(CLOSE_MARK, "").strip()
     reply, request = extract_request(reply)
     reply, dossier_new = extract_dossier(reply)
+    # Служебный маркер скоринга (Фаза 1): ВСЕГДА вырезаем из reply до отправки,
+    # чтобы [[SCORE ...]] не утёк человеку; сигналы кладём в БД (крэш-сейф).
+    reply, score = extract_score(reply)
+    if score:
+        await save_lead_signals(
+            user.id,
+            heat=score.get("heat"), open_=score.get("open"),
+            resist=score.get("resist"), value=score.get("value"))
     if dossier_new:
         await save_dossier(user.id, dossier_new)
     await ai_add_message(sid, user.id, "model", reply)
