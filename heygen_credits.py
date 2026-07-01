@@ -23,34 +23,48 @@ from lead_policy import CIRCLE_CREDITS
 
 logger = logging.getLogger(__name__)
 
-_QUOTA_URL = "https://api.heygen.com/v2/user/remaining_quota"
+# ВАЖНО: /v2/user/remaining_quota отдаёт API-квоту (details.api) — у подписочного
+# аккаунта она 0. Кредиты ПОДПИСКИ (те самые, что тратят кружки) — в user-profile:
+# GET /v3/users/me → remaining_credits (июнь-2026 HeyGen добавил это поле; v1/user/me
+# как фолбэк). Нормализуем ÷60 при больших числах (на случай 1/60-единиц).
+_ME_URLS = (
+    "https://api.heygen.com/v3/users/me",
+    "https://api.heygen.com/v1/user/me",
+)
 
 
 async def get_credits() -> int | None:
-    """Остаток HeyGen-кредитов (нормализовано). None — нет ключа/сбой.
+    """Остаток кредитов ПОДПИСКИ HeyGen. None — нет ключа/сбой.
 
-    HeyGen может отдавать remaining_quota в 1/60-кредита — нормализуем к кредитам
-    (÷60 при больших числах), чтобы порог был в понятных «кредитах»."""
+    Читает remaining_credits из /v3/users/me (фолбэк /v1/user/me), с запасным
+    путём к вложенному premium_credits.remaining. Нормализует к «кредитам»."""
     if not settings.heygen_api_key:
         return None
-    try:
-        headers = {"X-Api-Key": settings.heygen_api_key, "accept": "application/json"}
-        async with aiohttp.ClientSession() as s:
-            async with s.get(_QUOTA_URL, headers=headers,
-                             timeout=aiohttp.ClientTimeout(total=20)) as r:
-                body = await r.json()
-    except Exception:
-        logger.warning("HeyGen quota request failed (continuing)", exc_info=True)
-        return None
-    raw = (body.get("data") or {}).get("remaining_quota")
-    if raw is None:
-        logger.warning("HeyGen quota: no remaining_quota in %s", str(body)[:200])
-        return None
-    try:
-        raw = float(raw)
-    except (TypeError, ValueError):
-        return None
-    return int(raw / 60) if raw > 5000 else int(raw)
+    headers = {"X-Api-Key": settings.heygen_api_key, "accept": "application/json"}
+    for url in _ME_URLS:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers,
+                                 timeout=aiohttp.ClientTimeout(total=20)) as r:
+                    body = await r.json()
+        except Exception:
+            logger.warning("HeyGen %s failed (continuing)", url, exc_info=True)
+            continue
+        node = body.get("data") if isinstance(body.get("data"), dict) else body
+        val = node.get("remaining_credits")
+        if val is None:  # запасной путь: {credits:{premium_credits:{remaining}}}
+            creds = node.get("credits") if isinstance(node.get("credits"), dict) else {}
+            pc = creds.get("premium_credits") if isinstance(creds.get("premium_credits"), dict) else {}
+            val = pc.get("remaining")
+        if val is None:
+            logger.warning("HeyGen %s: no remaining_credits in %s", url, str(body)[:200])
+            continue
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            continue
+        return int(val / 60) if val > 5000 else int(val)
+    return None
 
 
 def circles_left(credits: int) -> int:
