@@ -297,6 +297,7 @@ def build_system(name: str | None, povorot: int | None,
 
     return "\n\n".join([
         ALENA_VOICE,
+        ALENA_GOLD,
         KNOWLEDGE_CORE,
         SESSION_ARC,
         HERMES_STRATEGY,
@@ -409,6 +410,7 @@ def build_response_prompt(name: str | None, archetype: dict | None,
 
     return "\n\n".join([
         ALENA_VOICE,
+        ALENA_GOLD,
         BOUNDS,
         CRISIS_NOTE,
         f"""ТВОЙ ХОД СЕЙЧАС (внутренняя директива — ИСПОЛНИ её своим живым голосом, НО НИКОГДА не проговаривай её вслух и не выдавай, что действуешь «по заданию»):
