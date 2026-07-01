@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -176,7 +177,8 @@ async def open_shadow_session(target: Message, user, code: str) -> bool:
     await ai_open_session(user.id)  # списание бесплатной встречи — здесь
     if await ai_total_sessions(user.id) <= 1:
         await target.answer(DISCLAIMER)
-    await target.answer(_shadow_opener(code), reply_markup=_pause_kbd(), parse_mode=None)
+    # Первый контакт — «вживую»: печатает → приходит пузырями (эффект присутствия).
+    await _send_alive(target, _shadow_opener(code), _pause_kbd())
     return True
 
 
@@ -312,6 +314,38 @@ async def _generate(history: list[dict], name, povorot, archetype,
     return text
 
 
+# ── «Живое присутствие»: индикатор печати + паузы + разбивка на реплики ───────
+def _split_bubbles(text: str, max_bubbles: int = 3) -> list[str]:
+    """Ответ → 1–3 «пузыря» по абзацам — как человек печатает несколькими сообщениями."""
+    paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if len(paras) <= 1:
+        return [text.strip()] if text.strip() else []
+    if len(paras) <= max_bubbles:
+        return paras
+    per = -(-len(paras) // max_bubbles)  # ceil
+    return ["\n\n".join(paras[i:i + per]) for i in range(0, len(paras), per)]
+
+
+async def _typing(message):
+    try:
+        await message.bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
+
+
+async def _send_alive(message, text: str, reply_markup=None):
+    """Ответ Алёны «вживую»: печатает → пауза → приходит несколькими репликами."""
+    bubbles = _split_bubbles(text)
+    if not bubbles:
+        return
+    for i, chunk in enumerate(bubbles):
+        last = (i == len(bubbles) - 1)
+        await _typing(message)
+        await asyncio.sleep(min(3.2, max(0.8, len(chunk) / 48)))  # читает/думает/печатает
+        await message.answer(chunk, parse_mode=None,
+                             reply_markup=(reply_markup if last else None))
+
+
 @alena_router.message(F.text, _InAlenaFilter())
 async def on_alena_talk(message: Message):
     """Текст во время активной встречи → общий обработчик хода."""
@@ -356,6 +390,7 @@ async def _talk(message: Message, text: str):
     force_close = turns >= TURN_CAP
     history = await ai_get_messages(sid, HISTORY_LIMIT)
 
+    await _typing(message)  # «печатает…» пока Алёна думает — эффект живого присутствия
     try:
         reply = await _generate(history, user.first_name, povorot, archetype, force_close, dossier)
     except Exception as e:
@@ -379,10 +414,10 @@ async def _talk(message: Message, text: str):
         await ai_close_session(sid)
         if request:
             await ai_set_last_request(user.id, request)
-        await message.answer(reply, parse_mode=None)
+        await _send_alive(message, reply)
         await _after_close(message, user, request)
     else:
-        await message.answer(reply, parse_mode=None, reply_markup=_pause_kbd())
+        await _send_alive(message, reply, _pause_kbd())
 
 
 # ── Голосовой ввод: человек отвечает голосом → распознаём → тот же ход ────────

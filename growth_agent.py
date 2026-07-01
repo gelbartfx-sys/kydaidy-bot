@@ -76,6 +76,11 @@ SEGMENTS = {
 }
 
 
+# Сегменты, где нудж уходит юзеру АВТОМАТИЧЕСКИ (без ручного ревью Кая).
+# Кай: включить авто-догон «поговорил-не-купил». Остальные — по-прежнему на ревью.
+_AUTO_SEND_SEGMENTS = {"alena_no_buy"}
+
+
 _TONE = (
     "Ты пишешь голосом Алёны Kyda Idy — анти-лайфкоучинг. Это ЛИЧНОЕ сообщение "
     "конкретной женщине в личку (не пост). Тон: тёплый «лещ честности», опора на "
@@ -222,6 +227,17 @@ async def run_growth_tick(bot, force: bool = False):
             continue
         draft = await growth_add_draft(user["tg_id"], seg, text)
         if not draft:
+            continue
+        if seg in _AUTO_SEND_SEGMENTS:
+            # Авто-догон: шлём юзеру сразу, 1 нудж (без ревью). Cooldown уже учтён.
+            try:
+                await bot.send_message(user["tg_id"], text, parse_mode=None)
+                await growth_set_status(draft["id"], "sent")
+                await mark_reactivated(user["tg_id"])
+                made += 1
+            except Exception:
+                logger.exception("growth auto-send failed for %s", user["tg_id"])
+                await growth_set_status(draft["id"], "failed")
             continue
         try:
             await _send_review_card(bot, draft, user)
