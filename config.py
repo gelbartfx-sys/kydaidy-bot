@@ -32,6 +32,16 @@ class Settings(BaseSettings):
     brain_diagnose_model: str = "claude-opus-4-8"
     brain_respond_model: str = "claude-haiku-4-5"
 
+    # ── HeyGen кредит-монитор (жёсткая фиксация: Кай узнаёт о кредитах заранее) ──
+    # Бот периодически смотрит баланс HeyGen и ПИШЕТ Каю в Telegram, когда кредиты
+    # на исходе (живые кружки коуча тратят кредиты; голос — бесплатный). Плюс
+    # команда /credits — баланс по запросу. Мониторинг включается, когда задан
+    # HEYGEN_API_KEY в env (иначе тихо спит). См. docs/hermes/credit-alerts-SPEC.md.
+    heygen_api_key: str = ""
+    credit_warn: int = 80      # ≤ этого (≈10 кружков) — предупреждение Каю
+    credit_urgent: int = 24    # ≤ этого (≈3 кружка) — срочный алерт
+    credit_check_hours: int = 6   # как часто джоб проверяет баланс
+
     webhook_base_url: str = ""
     webhook_path: str = "/tg-webhook"
     port: int = 8080

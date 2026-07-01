@@ -297,6 +297,12 @@ _RUNTIME_MIGRATIONS = (
     # method_phase, track). ALTER «duplicate column» после первого прогона ловит
     # try/except в init_db — деградирует только эта фича, не весь бот.
     "ALTER TABLE users ADD COLUMN client_model TEXT",
+    # ── Служебное key-value бота (напр. дата последнего кредит-алерта HeyGen,
+    # чтобы не спамить Каю чаще раза в день на уровень). Крэш-сейф как остальные.
+    """CREATE TABLE IF NOT EXISTS bot_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )""",
 )
 
 
@@ -405,6 +411,28 @@ async def get_client_model(tg_id: int) -> dict | None:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+# ── Служебное key-value (bot_meta) — напр. дата последнего кредит-алерта ──────
+async def get_meta(key: str) -> str | None:
+    """Значение служебного ключа bot_meta → str | None. Крэш-сейф."""
+    try:
+        row = await _exec("SELECT value FROM bot_meta WHERE key = ?", (key,), fetch="one")
+    except Exception:
+        logger.warning("get_meta failed (continuing)", exc_info=True)
+        return None
+    return (row or {}).get("value")
+
+
+async def set_meta(key: str, value: str) -> None:
+    """Записать служебный ключ bot_meta (upsert). Крэш-сейф."""
+    try:
+        await _exec(
+            "INSERT INTO bot_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value))
+    except Exception:
+        logger.warning("set_meta failed (continuing)", exc_info=True)
 
 
 # ── Скоринг лида (Фаза 1): сигналы собеседника + леджер кредитов ──────────────
