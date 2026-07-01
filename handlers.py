@@ -293,17 +293,19 @@ async def _prompt_shadow_photo(message: Message, dist: str):
 
 # Видео-кружки под каждую Тень (file_id готового кружка в Telegram). Пусто = не шлём.
 # v8-рецепт (Photo Avatar кабинет + Avatar IV + Motion + голос multilingual_v2). 01.07.
+# Обновлено 01.07: НОВЫЕ Digital Twin (Avatar V, 2 твина, чередование ракурсов),
+# тексты выверены, Кай одобрил. Твины A `2ab45471…` (W·H·F·R·D) / B `ba9b5ad5…` (Q·M·MR·O·C).
 _KRUZHOK_FILE_IDS: dict[str, str] = {
-    "W": "DQACAgUAAxkDAAIB0WpEvygWAu6NV76lO6LK38j8rz4wAAIkIgACO4spVvbF9MoXB86dPAQ",
-    "Q": "DQACAgUAAxkDAAIB0mpEvzC3zfbL3Esi_Qsmu_3WAAHuHQACJSIAAjuLKVZ_8SGMozjkFzwE",
-    "H": "DQACAgUAAxkDAAIB02pEvzVFdB2BrUmD1lhNz0dX2w2eAAImIgACO4spVvXpFX2zB3I9PAQ",
-    "M": "DQACAgUAAxkDAAIB1GpEvzxYLrojYbl5J-Ty6HgQ3K9iAAInIgACO4spVh5UsbS6RapXPAQ",
-    "MR": "DQACAgUAAxkDAAIB1WpEv0lZ9WKgpLf6lAKjvQ9ZO7MQAAIoIgACO4spVnzFlXg-P_aiPAQ",
-    "R": "DQACAgUAAxkDAAIB1mpEv08Xc3AiaHqgP0Ta6igiHnLuAAIpIgACO4spVlwa7gQtA4RtPAQ",
-    "O": "DQACAgUAAxkDAAIB12pEv1aCg443T7kKqOnTiKKppmWFAAIqIgACO4spVhKP2p9kT9ERPAQ",
-    "D": "DQACAgUAAxkDAAIB2GpEv1zDUIaFTkB64gczF_RZwwABggACKyIAAjuLKVYhtdkShOUL5zwE",
-    "C": "DQACAgUAAxkDAAIB2WpEv2NjGjqIwM4aEzhrICGKX88fAAIsIgACO4spVo9F21QWmcvqPAQ",
-    "F": "DQACAgUAAxkDAAIB2mpEv3W1MiW2FvI8pbEgsS5cddsvAAItIgACO4spVkLLlCHn0c0FPAQ",
+    "W": "DQACAgUAAxkDAAIB5mpE9NVsEXSWhFowZiivtWq8z4iPAAK2IgACO4spVouE6Sn7sFoRPAQ",
+    "C": "DQACAgUAAxkDAAIB52pE9OHWg50qgUg3j65apkEjn2oAA7ciAAI7iylWU8ijvXLP9OM8BA",
+    "H": "DQACAgUAAxkDAAIB6GpE9OnLzzB4LLxXV1tK0EUIumyTAAK4IgACO4spVogQilfJMhy-PAQ",
+    "F": "DQACAgUAAxkDAAIB6WpE9PNvG1uo9jREw-T8weqQVbCHAAK5IgACO4spVkoDRu5PgGWNPAQ",
+    "R": "DQACAgUAAxkDAAIB6mpE9P-xlddKgUM9Y3_251-u5P-NAAK6IgACO4spVu1CSHRs-u3LPAQ",
+    "D": "DQACAgUAAxkDAAIB62pE9UJ96ogbQxOGZVRI5A4533VCAAK7IgACO4spVk2lnWq6xIqkPAQ",
+    "Q": "DQACAgUAAxkDAAIB7GpE9VjpcdqeF6wuzrJ_9cajVq-CAAK8IgACO4spVk92J0ehk4XgPAQ",
+    "M": "DQACAgUAAxkDAAIB7WpE9Wej88AE_epZojKjR9W5izUpAAK9IgACO4spVuRvGsb_IrczPAQ",
+    "MR": "DQACAgUAAxkDAAIB7mpE9XYN4kdrKH21sLED6N9hZXrfAAK_IgACO4spVlHC4FrXzg2OPAQ",
+    "O": "DQACAgUAAxkDAAIB72pE9YB0b8aJbbP1Ig9I5ErjrMzlAALAIgACO4spVqPVU3D209AwPAQ",
 }
 
 
