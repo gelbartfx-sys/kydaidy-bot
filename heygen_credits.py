@@ -51,20 +51,54 @@ async def get_credits() -> int | None:
             logger.warning("HeyGen %s failed (continuing)", url, exc_info=True)
             continue
         node = body.get("data") if isinstance(body.get("data"), dict) else body
-        val = node.get("remaining_credits")
-        if val is None:  # запасной путь: {credits:{premium_credits:{remaining}}}
-            creds = node.get("credits") if isinstance(node.get("credits"), dict) else {}
-            pc = creds.get("premium_credits") if isinstance(creds.get("premium_credits"), dict) else {}
-            val = pc.get("remaining")
+        val = _extract_balance(node)
         if val is None:
-            logger.warning("HeyGen %s: no remaining_credits in %s", url, str(body)[:200])
-            continue
-        try:
-            val = float(val)
-        except (TypeError, ValueError):
+            logger.warning("HeyGen %s: баланс не найден в %s", url, str(body)[:200])
             continue
         return int(val / 60) if val > 5000 else int(val)
     return None
+
+
+def _num(x):
+    """int/float из x, иначе None."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_balance(node: dict):
+    """Остаток из UserInfoResponse (/v3/users/me) по типу биллинга.
+
+    Подписка: subscription.credits.(premium+add_on).remaining (суммируем).
+    Иначе — usage_based.remaining_credits / wallet.remaining_balance /
+    плоское remaining_credits. → число | None."""
+    if not isinstance(node, dict):
+        return None
+    sub = node.get("subscription")
+    if isinstance(sub, dict):
+        creds = sub.get("credits") if isinstance(sub.get("credits"), dict) else {}
+        total, found = 0.0, False
+        for k in ("premium_credits", "add_on_credits"):
+            c = creds.get(k)
+            if isinstance(c, dict):
+                n = _num(c.get("remaining"))
+                if n is not None:
+                    total += n
+                    found = True
+        if found:
+            return total
+    ub = node.get("usage_based")
+    if isinstance(ub, dict):
+        n = _num(ub.get("remaining_credits"))
+        if n is not None:
+            return n
+    w = node.get("wallet")
+    if isinstance(w, dict):
+        n = _num(w.get("remaining_balance"))
+        if n is not None:
+            return n
+    return _num(node.get("remaining_credits"))
 
 
 def circles_left(credits: int) -> int:
