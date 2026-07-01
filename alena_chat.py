@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 
@@ -75,8 +77,18 @@ def _start_kbd() -> InlineKeyboardMarkup:
 
 
 def _pause_kbd() -> InlineKeyboardMarkup:
+    # Клуб-CTA доступен ПРЯМО во время встречи — оффер не «теряется», если она
+    # замолчит на пике (Hermes #1). Внизу — тихая кнопка завершить.
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✦ Войти в Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
         [InlineKeyboardButton(text="⏸ завершить встречу", callback_data="alena:stop")],
+    ])
+
+
+def _club_only_kbd() -> InlineKeyboardMarkup:
+    # Один CTA на пике — только Клуб (Hermes #3), без расщепления цен. 1:1 — текстом.
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✦ Войти в Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
     ])
 
 
@@ -302,16 +314,22 @@ async def _generate(history: list[dict], name, povorot, archetype,
 
 @alena_router.message(F.text, _InAlenaFilter())
 async def on_alena_talk(message: Message):
+    """Текст во время активной встречи → общий обработчик хода."""
+    await _talk(message, message.text)
+
+
+async def _talk(message: Message, text: str):
+    """Один ход встречи (текст ИЛИ расшифрованный голос) → ответ Алёны."""
     user = message.from_user
     sess = await ai_active_session(user.id)
     if not sess:
         return
     sid = sess["id"]
 
-    await ai_add_message(sid, user.id, "user", message.text)
+    await ai_add_message(sid, user.id, "user", text)
 
     # Кризис — не зовём модель, сразу бережная эскалация (встреча остаётся открытой).
-    if is_crisis(message.text):
+    if is_crisis(text):
         await message.answer(CRISIS_REPLY, parse_mode=None, reply_markup=_pause_kbd())
         return
 
@@ -367,6 +385,60 @@ async def on_alena_talk(message: Message):
         await message.answer(reply, parse_mode=None, reply_markup=_pause_kbd())
 
 
+# ── Голосовой ввод: человек отвечает голосом → распознаём → тот же ход ────────
+class _InAlenaVoiceFilter(BaseFilter):
+    """Голосовое во время активной встречи → распознать и провести как реплику."""
+    async def __call__(self, message: Message) -> bool:
+        return message.voice is not None and \
+            await ai_active_session(message.from_user.id) is not None
+
+
+async def _transcribe_voice(bot, voice) -> str:
+    """Голосовое Telegram (ogg/opus) → текст через Gemini audio. Возвращает расшифровку."""
+    buf = io.BytesIO()
+    await bot.download(voice, destination=buf)
+    audio_b64 = base64.b64encode(buf.getvalue()).decode()
+    payload = {
+        "contents": [{"parts": [
+            {"inline_data": {"mime_type": "audio/ogg", "data": audio_b64}},
+            {"text": "Расшифруй это русское голосовое сообщение в текст дословно. "
+                     "Верни ТОЛЬКО расшифровку, без кавычек и комментариев."},
+        ]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 1024,
+                             "thinkingConfig": {"thinkingBudget": 0}},
+    }
+    url = f"{BASE}/models/{TEXT_MODEL}:generateContent?key={settings.gemini_key}"
+    async with aiohttp.ClientSession() as s:
+        async with s.post(url, json=payload,
+                          timeout=aiohttp.ClientTimeout(total=90)) as r:
+            body = await r.json()
+    parts = body.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    return "".join(p.get("text", "") for p in parts).strip()
+
+
+@alena_router.message(_InAlenaVoiceFilter())
+async def on_alena_voice(message: Message):
+    """Человек отвечает голосом → распознаём в текст → ведём встречу как обычно."""
+    if not settings.gemini_key:
+        await message.answer("Голос сейчас не распознаю — напиши, пожалуйста, текстом.",
+                             parse_mode=None)
+        return
+    try:
+        text = await _transcribe_voice(message.bot, message.voice)
+    except Exception:
+        logger.exception("voice transcribe failed for %s", message.from_user.id)
+        await message.answer("Не расслышала голосовое — скажи ещё раз или напиши текстом.",
+                             parse_mode=None)
+        return
+    if not text:
+        await message.answer("Голосовое будто пустое — скажи ещё раз или напиши.",
+                             parse_mode=None)
+        return
+    # Показываем расшифровку — человек видит, что я расслышала его слова.
+    await message.answer(f"🎙️ {text}", parse_mode=None)
+    await _talk(message, text)
+
+
 async def _after_close(message: Message, user, request: str | None = None):
     rem = await _remaining(user)
 
@@ -394,8 +466,8 @@ async def _after_close(message: Message, user, request: str | None = None):
             "на эфирах каждую неделю. Клуб только открылся: ты заходишь одной из первых — "
             "это твой круг с самого начала.\n\n"
             "990 в месяц — меньше, чем кофе раз в неделю, чтобы не быть с этим одной. "
-            "А вглубь и лично — сессия 1:1.\n\n— Алёна",
-            reply_markup=_club_kbd(), parse_mode=None)
+            "А если захочешь сразу вглубь и лично — напиши, есть встреча 1:1.\n\n— Алёна",
+            reply_markup=_club_only_kbd(), parse_mode=None)
         return
 
     # Запроса не вскрылось / ей хватило — честно, без втюхивания.
@@ -407,5 +479,5 @@ async def _after_close(message: Message, user, request: str | None = None):
         "Это была твоя бесплатная встреча — одна на человека.\n\n"
         "Если захочешь продолжить — я рядом регулярно в Клубе «Манифест»: без лимита, "
         "в чате и на эфирах. Клуб только открылся, ты заходишь одной из первых. "
-        "990 в месяц — чтобы не быть с этим одной. А вглубь и лично — встреча 1:1.",
-        reply_markup=_club_kbd())
+        "990 в месяц — чтобы не быть с этим одной.",
+        reply_markup=_club_only_kbd())

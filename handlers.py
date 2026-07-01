@@ -165,8 +165,12 @@ async def cb_check_sub(cb: CallbackQuery):
         await cb.answer("Готово 🤍")
         await cb.message.answer(
             "🤍 Вижу тебя в канале — спасибо, что рядом.\n\n"
-            "Если захочешь поговорить про свою Тень начистоту, у меня есть "
-            "бесплатная встреча: /alena")
+            "А если хочешь быть рядом каждую неделю — живые эфиры, закрытый чат, я без "
+            "лимита в переписке — это Клуб «Манифест», 990 ₽/мес.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✦ Клуб «Манифест» — 990 ₽/мес",
+                                      callback_data="buy:manifest_club")],
+            ]))
     else:
         await cb.answer("Пока не вижу подписки — подпишись и жми ещё раз 🙏", show_alert=True)
 
@@ -507,11 +511,13 @@ async def cb_nurture_no(callback: CallbackQuery):
 
 
 def _products_menu_keyboard() -> InlineKeyboardMarkup:
+    # Клуб — герой (первым). Бесплатное «поговорить» уведено ВНИЗ (Hermes #2:
+    # бесплатное не должно стоять над платным).
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Алёна на связи — бесплатно", callback_data="alena")],
             [InlineKeyboardButton(text="✦ Клуб «Манифест» — 990 ₽/мес", callback_data="buy:manifest_club")],
             [InlineKeyboardButton(text="✦ «Манифест 1:1» — от 7 000 ₽", callback_data="buy:manifest_1on1")],
+            [InlineKeyboardButton(text="💬 Сначала поговорить со мной", callback_data="alena")],
             _nav_row(),
         ]
     )
