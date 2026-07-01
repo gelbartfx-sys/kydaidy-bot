@@ -32,6 +32,7 @@ from database import (
     ai_active_session, ai_total_sessions,
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
     ai_close_session, ai_set_last_request, save_dossier,
+    ai_stale_sessions, ai_mark_nudged,
 )
 from alena_persona import (
     build_system, DISCLAIMER, INTRO, CLOSE_MARK, is_crisis, CRISIS_REPLY,
@@ -481,6 +482,48 @@ async def on_alena_voice(message: Message):
     # Показываем расшифровку — человек видит, что я расслышала его слова.
     await message.answer(f"🎙️ {text}", parse_mode=None)
     await _talk(message, text)
+
+
+# ── Hermes #1: «затихшая» встреча → один мягкий оффер Клуба ────────────────────
+# Человек начал встречу, Алёна задала вопрос/сделала оффер — и он замолчал на
+# пике. Оффер не должен теряться в тишине: через N минут молчания шлём ОДИН
+# тёплый нудж с дверью в Клуб. Встреча остаётся открытой — можно ответить дальше.
+_STALE_NUDGE_TEXT = (
+    "Ты затихла — и это нормально. Иногда то, что мы задели, нужно донести молча.\n\n"
+    "Я не тороплю и не исчезаю. Захочешь продолжить — просто напиши, я здесь.\n\n"
+    "А если почувствуешь, что не хочешь оставаться с этим одна — я рядом каждый "
+    "день в Клубе «Манифест»: без лимита наших встреч, в чате и на эфирах. "
+    "990 в месяц, чтобы не разбираться в одиночку.\n\n— Алёна"
+)
+
+
+async def run_stale_session_tick(bot):
+    """Фоновый джоб (планировщик bot.py): активные встречи, где последней была
+    реплика Алёны и человек молчит дольше settings.stale_nudge_minutes → ОДИН
+    мягкий оффер Клуба. Один нудж на встречу (метка nudged_at). Возвращает
+    число отправленных — для лога/диагностики.
+    """
+    if not settings.stale_nudge_enabled:
+        return 0
+    rows = await ai_stale_sessions(settings.stale_nudge_minutes)
+    sent = 0
+    for r in rows:
+        sid = r.get("session_id")
+        tg_id = r.get("tg_id")
+        if not sid or not tg_id:
+            continue
+        # Метим ДО отправки: сбой доставки (юзер закрыл личку) не должен крутить
+        # нудж на следующем тике — задвоенный outreach хуже одного пропуска.
+        await ai_mark_nudged(sid)
+        try:
+            await bot.send_message(tg_id, _STALE_NUDGE_TEXT,
+                                   reply_markup=_pause_kbd(), parse_mode=None)
+            sent += 1
+        except Exception:
+            logger.warning("stale nudge send failed for %s", tg_id, exc_info=True)
+    if sent:
+        logger.info("stale nudge: sent %s club offer(s) to quiet meetings", sent)
+    return sent
 
 
 async def _after_close(message: Message, user, request: str | None = None):

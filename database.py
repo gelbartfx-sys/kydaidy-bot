@@ -109,7 +109,8 @@ CREATE TABLE IF NOT EXISTS ai_sessions (
     status TEXT DEFAULT 'active',
     turns INTEGER DEFAULT 0,
     started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    closed_at TIMESTAMP
+    closed_at TIMESTAMP,
+    nudged_at TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS ai_messages (
@@ -197,7 +198,8 @@ _RUNTIME_MIGRATIONS = (
         status TEXT DEFAULT 'active',
         turns INTEGER DEFAULT 0,
         started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        closed_at TIMESTAMP
+        closed_at TIMESTAMP,
+        nudged_at TIMESTAMP
     )""",
     """CREATE TABLE IF NOT EXISTS ai_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,6 +265,10 @@ _RUNTIME_MIGRATIONS = (
     # AI-Алёна дописывает после каждой встречи; подгружается в её контекст и в вид 1:1.
     "ALTER TABLE users ADD COLUMN dossier TEXT",
     "ALTER TABLE users ADD COLUMN dossier_at TIMESTAMP",
+    # ── Hermes #1: когда на «затихшей» встрече уже слали мягкий оффер Клуба.
+    # NULL => ещё не слали. Существующий прод-D1 уже имеет ai_sessions без неё —
+    # ALTER докатывает; «duplicate column» после первого прогона ловит try/except.
+    "ALTER TABLE ai_sessions ADD COLUMN nudged_at TIMESTAMP",
 )
 
 
@@ -579,6 +585,38 @@ async def ai_get_messages(session_id: int, limit: int = 40):
         "SELECT role, content FROM ai_messages WHERE session_id = ? "
         "ORDER BY id ASC LIMIT ?",
         (session_id, limit), fetch="all")
+
+
+async def ai_stale_sessions(minutes: int, limit: int = 50):
+    """Активные встречи, «затихшие на пике»: последнее сообщение — от Алёны
+    ('model', т.е. она задала вопрос/сделала оффер), человек молчит дольше
+    `minutes`, и мягкий нудж ещё не слали (nudged_at IS NULL).
+
+    Крэш-сейф: если колонки/таблицы нет (миграция не докатилась) — вернём [],
+    деградирует только эта фича, не планировщик.
+    """
+    try:
+        return await _exec(
+            "SELECT s.id AS session_id, s.tg_id AS tg_id "
+            "FROM ai_sessions s "
+            "JOIN ai_messages m ON m.id = ("
+            "    SELECT id FROM ai_messages WHERE session_id = s.id "
+            "    ORDER BY id DESC LIMIT 1) "
+            "WHERE s.status = 'active' AND s.nudged_at IS NULL AND s.turns > 0 "
+            "AND m.role = 'model' "
+            f"AND datetime(m.created_at) < datetime('now', '-{int(minutes)} minutes') "
+            f"LIMIT {int(limit)}",
+            fetch="all") or []
+    except Exception:
+        logger.warning("ai_stale_sessions failed (degraded)", exc_info=True)
+        return []
+
+
+async def ai_mark_nudged(session_id: int):
+    """Пометить, что на этой встрече уже слали мягкий оффер Клуба (один на встречу)."""
+    await _exec(
+        "UPDATE ai_sessions SET nudged_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (session_id,))
 
 
 # ── Контент-конвейер: items ──────────────────────────────────────────────────

@@ -27,7 +27,7 @@ from config import settings
 from database import init_db
 from handlers import router
 from manifest7_guide import guide_router
-from alena_chat import alena_router
+from alena_chat import alena_router, run_stale_session_tick
 from curator import curator_router, push_daily_batch, publish_tick
 from growth_agent import growth_router, run_growth_tick
 from nurture import run_nurture_tick
@@ -123,6 +123,12 @@ async def main():
     scheduler.add_job(
         run_growth_tick, "interval",
         hours=settings.growth_tick_hours, args=[bot])
+    # Hermes #1: мягкий оффер Клуба на «затихшей» AI-встрече (человек замолчал
+    # на пике). Джоб no-op, если stale_nudge_enabled=False. Проверка — часто,
+    # порог молчания (stale_nudge_minutes) фильтрует сам запрос.
+    scheduler.add_job(
+        run_stale_session_tick, "interval",
+        minutes=settings.stale_nudge_tick_min, args=[bot])
     scheduler.start()
 
     # Webhook server (для Tally + Tribute)
