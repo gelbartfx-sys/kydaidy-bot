@@ -28,9 +28,46 @@ from shadow_test import ARCHETYPES
 logger = logging.getLogger(__name__)
 
 _ENV_KEY = os.environ.get("GEMINI_KEY", "")
-IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image-preview")
+# Nano Banana. GA-идентификатор без "-preview" (preview-модели снимают после GA → 404/ошибка).
+# Фолбэк-цепочка: если ведущая модель отвалилась, пробуем следующую стабильную.
+IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
+# env-модель пробуем первой, но GA-модели ВСЕГДА в резерве (даже если env указывает на снятый preview).
+IMAGE_MODEL_FALLBACKS = list(dict.fromkeys([
+    IMAGE_MODEL,
+    "gemini-3.1-flash-image",          # Nano Banana 2 GA
+    "gemini-3.1-flash-image-preview",  # если у аккаунта ещё preview-доступ
+    "gemini-2.5-flash-image",          # Nano Banana 1 (стабильный GA) — последний резерв
+]))
 TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
 BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+
+async def _gen_image_payload(payload: dict, api_key: str | None, what: str) -> bytes:
+    """Шлёт payload на image-модель с фолбэком по списку моделей. Возвращает image bytes."""
+    import aiohttp as _aiohttp
+    last_err = ""
+    key = api_key or _ENV_KEY
+    for model in IMAGE_MODEL_FALLBACKS:
+        url = f"{BASE}/models/{model}:generateContent?key={key}"
+        try:
+            async with _aiohttp.ClientSession() as s:
+                async with s.post(url, json=payload,
+                                  timeout=_aiohttp.ClientTimeout(total=120)) as r:
+                    body = await r.json()
+        except Exception as e:                      # сетевой сбой — пробуем след. модель
+            last_err = f"{model}: {e}"; continue
+        if "candidates" not in body:
+            last_err = f"{model}: {json.dumps(body)[:200]}"
+            logger.warning("image gen model %s failed: %s", model, last_err)
+            continue
+        for p in body["candidates"][0].get("content", {}).get("parts", []):
+            inline = p.get("inlineData") or p.get("inline_data")
+            if inline and str(inline.get("mimeType") or inline.get("mime_type", "")).startswith("image/"):
+                if model != IMAGE_MODEL_FALLBACKS[0]:
+                    logger.info("image gen: сработала фолбэк-модель %s", model)
+                return base64.b64decode(inline["data"])
+        last_err = f"{model}: no image in response"
+    raise RuntimeError(f"{what} failed on all models: {last_err}")
 
 # --- Жёсткий tone-of-voice блок (из docs/positioning.md) ---
 _FORBIDDEN = (
@@ -150,17 +187,19 @@ async def generate_hero_image(photo_bytes: bytes, code: str, clean: bool = False
         "contents": [{"parts": parts}],
         "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
     }
-    url = f"{BASE}/models/{IMAGE_MODEL}:generateContent?key={api_key or _ENV_KEY}"
-    async with aiohttp.ClientSession() as s:
-        async with s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as r:
-            body = await r.json()
-    if "candidates" not in body:
-        raise RuntimeError(f"image gen failed: {json.dumps(body)[:300]}")
-    for p in body["candidates"][0].get("content", {}).get("parts", []):
-        inline = p.get("inlineData") or p.get("inline_data")
-        if inline and str(inline.get("mimeType") or inline.get("mime_type", "")).startswith("image/"):
-            return base64.b64decode(inline["data"])
-    raise RuntimeError(f"image gen: no image in response: {json.dumps(body)[:300]}")
+    return await _gen_image_payload(payload, api_key, "hero image gen")
+
+
+async def generate_background_image(prompt: str, api_key: str | None = None) -> bytes:
+    """Атмосферный вертикальный ФОН для пина (Nano Banana, без входного фото).
+
+    prompt — готовый текст-промпт сцены. Возвращает image bytes. Текст на фоне
+    НЕ рисуем (его накладывает pin_image поверх) — просим чистую сцену без букв."""
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+    return await _gen_image_payload(payload, api_key, "bg image gen")
 
 
 # --------------------------------------------------------------------------- CLI
