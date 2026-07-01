@@ -84,6 +84,7 @@ def _menu_kbd() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌑 Узнать свою Тень", callback_data="quiz")],
         [InlineKeyboardButton(text="🛍️ Что доступно", callback_data="products")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="menu")],
     ])
 
 
@@ -133,19 +134,40 @@ async def _entry(target: Message, user):
     await target.answer(INTRO + tail, reply_markup=_start_kbd())
 
 
+_ALENA_FAIL = ("Я рядом. Секунду не получилось открыть встречу — попробуй ещё раз "
+               "через /alena или напиши мне @kydaidy.")
+
+
 @alena_router.message(Command("alena"))
 async def cmd_alena(message: Message):
-    await _entry(message, message.from_user)
+    try:
+        await _entry(message, message.from_user)
+    except Exception:
+        logger.exception("alena _entry failed (cmd) for %s", message.from_user.id)
+        await message.answer(_ALENA_FAIL, parse_mode=None)
 
 
 @alena_router.callback_query(F.data == "alena")
 async def cb_alena(callback: CallbackQuery):
-    await _entry(callback.message, callback.from_user)
+    try:
+        await _entry(callback.message, callback.from_user)
+    except Exception:
+        logger.exception("alena _entry failed (cb) for %s", callback.from_user.id)
+        await callback.message.answer(_ALENA_FAIL, parse_mode=None)
     await callback.answer()
 
 
 @alena_router.callback_query(F.data == "alena:start")
 async def cb_start(callback: CallbackQuery):
+    try:
+        await _do_start(callback)
+    except Exception:
+        logger.exception("alena start failed for %s", callback.from_user.id)
+        await callback.message.answer(_ALENA_FAIL, parse_mode=None)
+    await callback.answer()
+
+
+async def _do_start(callback: CallbackQuery):
     user = callback.from_user
     if await ai_active_session(user.id):
         await callback.message.answer("Мы уже во встрече — пиши.")

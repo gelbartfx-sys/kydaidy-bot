@@ -123,20 +123,23 @@ _CHANNEL = settings.tg_channel_id                       # "@kydaidy" (для get
 _CHANNEL_URL = "https://t.me/" + _CHANNEL.lstrip("@")
 
 
-async def _is_subscribed(bot, tg_id: int) -> bool:
-    """Подписан ли юзер на публичный канал. Бот должен быть участником/админом канала —
-    иначе get_chat_member падает, и мы мягко считаем «не подписан» (призыв всё равно показан)."""
+async def _is_subscribed(bot, tg_id: int) -> bool | None:
+    """Подписан ли юзер на публичный канал.
+    True — подписан, False — точно нет, None — ПРОВЕРИТЬ НЕЛЬЗЯ (бот не админ канала:
+    get_chat_member даёт «member list is inaccessible»). None разводим оптимистично,
+    чтобы не блокировать рост, пока боту не выдали права админа в @kydaidy."""
     try:
         m = await bot.get_chat_member(_CHANNEL, tg_id)
         return getattr(m, "status", "") in ("member", "administrator", "creator")
     except Exception:
-        logger.warning("get_chat_member(%s) failed (continuing)", _CHANNEL, exc_info=True)
-        return False
+        logger.warning("get_chat_member(%s) недоступен — бот не админ канала?", _CHANNEL, exc_info=True)
+        return None
 
 
 @router.callback_query(F.data == "check_sub")
 async def cb_check_sub(cb: CallbackQuery):
-    if await _is_subscribed(cb.bot, cb.from_user.id):
+    sub = await _is_subscribed(cb.bot, cb.from_user.id)
+    if sub is not False:  # True (подписан) ИЛИ None (не смогли проверить) → засчитываем
         await cb.answer("Готово 🤍")
         await cb.message.answer(
             "🤍 Вижу тебя в канале — спасибо, что рядом.\n\n"
