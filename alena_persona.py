@@ -31,6 +31,10 @@ SCORE_RE = re.compile(
 _SCORE_FIELD_RE = re.compile(
     r"([жосцЖОСЦ])\s*=\s*([0-3])", re.IGNORECASE)
 _SCORE_KEY = {"ж": "heat", "о": "open", "с": "resist", "ц": "value"}
+# Защита от ОБРЕЗАННОГО маркера: если модель упёрлась в лимит токенов ровно на
+# служебной строке ([[SCORE ж=2 … без закрывающих ]]), полный SCORE_RE не сработает.
+# Этот срезает любой висячий «[[SCORE…» до конца строки, чтобы огрызок не утёк.
+_SCORE_DANGLING_RE = re.compile(r"\[\[\s*SCORE\b.*$", re.IGNORECASE | re.DOTALL)
 
 
 def extract_request(text: str) -> tuple[str, str | None]:
@@ -69,9 +73,11 @@ def extract_score(text: str) -> tuple[str, dict | None]:
     if not text:
         return text, None
     m = SCORE_RE.search(text)
+    # Чистим ВСЕГДА: и полный маркер, и висячий огрызок (обрезка ответа).
+    clean = SCORE_RE.sub("", text)
+    clean = _SCORE_DANGLING_RE.sub("", clean).strip()
     if not m:
-        return text, None
-    clean = SCORE_RE.sub("", text).strip()
+        return clean, None
     signals: dict = {}
     for fm in _SCORE_FIELD_RE.finditer(m.group(1)):
         key = _SCORE_KEY.get(fm.group(1).lower())
