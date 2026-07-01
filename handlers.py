@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import asyncio
 import logging
 from pathlib import Path
@@ -83,28 +84,41 @@ _SOURCE_ALIAS = {
 }
 
 
+# Функциональные deep-link префиксы — их НИКОГДА не считаем источником.
+_FUNC_PREFIXES = ("s_", "shadow_", "povorot")
+
+
 def _split_source(args: str) -> tuple[str, str | None]:
     """(core_args, source). Отрезает источник: суффикс «__tag» или весь бэр-токен.
 
-    Не ломает существующие deep-link (s_/shadow_/povorot): если метки нет —
-    возвращает args как есть и source=None."""
+    Ловим переходы со ВСЕХ ресурсов: известный канал (SOURCE_TAGS, с нормализацией
+    синонимов) ИЛИ произвольная метка новой площадки (?start=facebook, ?start=blog_jan)
+    — чтобы новый канал трекался без правки кода. Не ломает функциональные deep-link
+    (s_/shadow_/povorot): если метки нет — возвращает args как есть и source=None."""
     if not args:
         return args, None
 
-    def _norm(tok: str) -> str | None:
+    def _norm_any(tok: str) -> str | None:
+        """Нормализованное имя источника или None (если это не похоже на метку)."""
         t = tok.strip().lower()
         if t.startswith("src_") or t.startswith("src-"):
             t = t[4:]
-        if t in SOURCE_TAGS:
+        if t in SOURCE_TAGS:                       # известный канал → синоним → канон
+            return _SOURCE_ALIAS.get(t, t)
+        # произвольная метка новой площадки: буквы/цифры/_/-, до 32 симв.,
+        # но не функциональный deep-link (его обрабатывают ниже как s_/shadow_/povorot).
+        if t.startswith(_FUNC_PREFIXES):
+            return None
+        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", t):
             return _SOURCE_ALIAS.get(t, t)
         return None
 
     if "__" in args:
         core, _, tail = args.rpartition("__")
-        tag = _norm(tail)
+        tag = _norm_any(tail)
         if tag:
             return core, tag
-    bare = _norm(args)
+    bare = _norm_any(args)
     if bare:
         return "", bare
     return args, None
