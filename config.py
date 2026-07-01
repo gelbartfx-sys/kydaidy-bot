@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     # Gemini (Nano Banana) — генерация портрета Тени + разбора в тесте архетипов.
     gemini_key: str = ""
 
+    # ── AI-Алёна «мозг v2» (Фаза 1 ядра, 2-проход диагноз→ответ) ──────────────
+    # OFF by default: живой поток _talk() идёт старым путём v1, байт-в-байт как
+    # сейчас, пока флаг не включён. Включается только когда ядро выверено.
+    brain_v2_enabled: bool = False
+    # Проход-ДИАГНОЗ (аналитик): дорогая thinking-модель на КОМПАКТНОМ входе
+    # (модель клиентки + ~6 реплик). Проход-ОТВЕТ использует TEXT_MODEL (flash).
+    gemini_diagnose_model: str = "gemini-2.5-pro"
+
     webhook_base_url: str = ""
     webhook_path: str = "/tg-webhook"
     port: int = 8080

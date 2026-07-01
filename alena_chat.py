@@ -33,11 +33,13 @@ from database import (
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
     ai_close_session, ai_set_last_request, save_dossier,
     ai_stale_sessions, ai_mark_nudged, save_lead_signals,
+    get_client_model, save_client_model,
 )
 from alena_persona import (
     build_system, DISCLAIMER, INTRO, CLOSE_MARK, is_crisis, CRISIS_REPLY,
     extract_request, extract_dossier, extract_score,
 )
+from alena_brain import brain_turn
 
 logger = logging.getLogger(__name__)
 alena_router = Router()
@@ -401,16 +403,31 @@ async def _talk(message: Message, text: str):
     history = await ai_get_messages(sid, HISTORY_LIMIT)
 
     await _typing(message)  # «печатает…» пока Алёна думает — эффект живого присутствия
-    try:
-        reply = await _generate(history, user.first_name, povorot, archetype, force_close, dossier)
-    except Exception as e:
-        logger.exception(f"alena talk failed for {user.id}: {e}")
-        await message.answer(
-            "Я тут — но прямо сейчас ответить не получается. "
-            "Попробуй чуть позже или напиши @kydaidy.",
-            parse_mode=None,
-        )
-        return
+
+    # Мозг v2 (Фаза 1 ядра) — ТОЛЬКО за флагом. При OFF путь v1 нетронут.
+    # Если brain_turn упал — фолбэк на v1 в том же ходе (try/except).
+    reply = None
+    if settings.brain_v2_enabled:
+        try:
+            cm = await get_client_model(user.id)
+            reply, new_cm = await brain_turn(history, user.first_name, archetype, cm)
+            await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
+        except Exception as e:
+            logger.warning("brain_v2 turn failed for %s → fallback v1: %s", user.id, e,
+                           exc_info=True)
+            reply = None  # → фолбэк ниже на v1-путь
+
+    if reply is None:
+        try:
+            reply = await _generate(history, user.first_name, povorot, archetype, force_close, dossier)
+        except Exception as e:
+            logger.exception(f"alena talk failed for {user.id}: {e}")
+            await message.answer(
+                "Я тут — но прямо сейчас ответить не получается. "
+                "Попробуй чуть позже или напиши @kydaidy.",
+                parse_mode=None,
+            )
+            return
 
     closed = (CLOSE_MARK in reply) or force_close
     reply = reply.replace(CLOSE_MARK, "").strip()

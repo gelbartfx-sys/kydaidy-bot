@@ -15,6 +15,7 @@ D1 — это SQLite под капотом, поэтому весь SQL ниже
 from __future__ import annotations
 
 import os
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS users (
     last_ai_request TEXT,
     dossier TEXT,
     dossier_at TIMESTAMP,
+    client_model TEXT,
     lead_heat INTEGER,
     lead_open INTEGER,
     lead_resist INTEGER,
@@ -289,6 +291,12 @@ _RUNTIME_MIGRATIONS = (
     "ALTER TABLE users ADD COLUMN lead_track TEXT",
     "ALTER TABLE users ADD COLUMN circle_credits_spent INTEGER DEFAULT 0",
     "ALTER TABLE users ADD COLUMN lead_updated_at TIMESTAMP",
+    # ── AI-Алёна «мозг v2» (Фаза 1 ядра): структурная модель клиентки как
+    # JSON-строка. Диагноз-проход обновляет её каждый ход (pattern, facade_lie,
+    # true_request_hypothesis, defenses[], objections[], readiness, given[],
+    # method_phase, track). ALTER «duplicate column» после первого прогона ловит
+    # try/except в init_db — деградирует только эта фича, не весь бот.
+    "ALTER TABLE users ADD COLUMN client_model TEXT",
 )
 
 
@@ -359,6 +367,44 @@ async def save_dossier(tg_id: int, dossier: str | None):
         )
     except Exception:
         logger.warning("save_dossier failed (continuing)", exc_info=True)
+
+
+# ── AI-Алёна «мозг v2» (Фаза 1 ядра): структурная модель клиентки (JSON) ──────
+# Живёт в users.client_model как JSON-строка. Диагноз-проход обновляет её каждый
+# ход. Всё крэш-сейф: любая ошибка (нет колонки / битый JSON) деградирует ТОЛЬКО
+# эту фичу, встреча не падает (вызывающий код фолбэчит на v1-путь).
+
+async def save_client_model(tg_id: int, model_json: str | None):
+    """Перезаписать структурную модель клиентки (JSON-строка). Крэш-сейф."""
+    if not model_json:
+        return
+    try:
+        await _exec(
+            "UPDATE users SET client_model = ? WHERE tg_id = ?",
+            (str(model_json)[:8000], tg_id),
+        )
+    except Exception:
+        logger.warning("save_client_model failed (continuing)", exc_info=True)
+
+
+async def get_client_model(tg_id: int) -> dict | None:
+    """Прочитать структурную модель клиентки → dict | None.
+
+    None при пусто/отсутствии колонки/битом JSON. Крэш-сейф."""
+    try:
+        row = await _exec(
+            "SELECT client_model FROM users WHERE tg_id = ?", (tg_id,), fetch="one")
+    except Exception:
+        logger.warning("get_client_model read failed (continuing)", exc_info=True)
+        return None
+    raw = (row or {}).get("client_model")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 # ── Скоринг лида (Фаза 1): сигналы собеседника + леджер кредитов ──────────────
