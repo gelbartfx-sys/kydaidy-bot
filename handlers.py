@@ -292,19 +292,33 @@ async def _prompt_shadow_photo(message: Message, dist: str):
 
 
 # Видео-кружки под каждую Тень (file_id готового кружка в Telegram). Пусто = не шлём.
-# Заполняется после продакшна кружков (v8-рецепт): шлём кружок 1 раз → берём file_id → сюда.
-_KRUZHOK_FILE_IDS: dict[str, str] = {}
+# v8-рецепт (Photo Avatar кабинет + Avatar IV + Motion + голос multilingual_v2). 01.07.
+_KRUZHOK_FILE_IDS: dict[str, str] = {
+    "W": "DQACAgUAAxkDAAIB0WpEvygWAu6NV76lO6LK38j8rz4wAAIkIgACO4spVvbF9MoXB86dPAQ",
+    "Q": "DQACAgUAAxkDAAIB0mpEvzC3zfbL3Esi_Qsmu_3WAAHuHQACJSIAAjuLKVZ_8SGMozjkFzwE",
+    "H": "DQACAgUAAxkDAAIB02pEvzVFdB2BrUmD1lhNz0dX2w2eAAImIgACO4spVvXpFX2zB3I9PAQ",
+    "M": "DQACAgUAAxkDAAIB1GpEvzxYLrojYbl5J-Ty6HgQ3K9iAAInIgACO4spVh5UsbS6RapXPAQ",
+    "MR": "DQACAgUAAxkDAAIB1WpEv0lZ9WKgpLf6lAKjvQ9ZO7MQAAIoIgACO4spVnzFlXg-P_aiPAQ",
+    "R": "DQACAgUAAxkDAAIB1mpEv08Xc3AiaHqgP0Ta6igiHnLuAAIpIgACO4spVlwa7gQtA4RtPAQ",
+    "O": "DQACAgUAAxkDAAIB12pEv1aCg443T7kKqOnTiKKppmWFAAIqIgACO4spVhKP2p9kT9ERPAQ",
+    "D": "DQACAgUAAxkDAAIB2GpEv1zDUIaFTkB64gczF_RZwwABggACKyIAAjuLKVYhtdkShOUL5zwE",
+    "C": "DQACAgUAAxkDAAIB2WpEv2NjGjqIwM4aEzhrICGKX88fAAIsIgACO4spVo9F21QWmcvqPAQ",
+    "F": "DQACAgUAAxkDAAIB2mpEv3W1MiW2FvI8pbEgsS5cddsvAAItIgACO4spVkLLlCHn0c0FPAQ",
+}
 
 
-async def _send_shadow_kruzhok(message: Message, code: str):
-    """Видео-кружок Алёны про её Тень (если готов для архетипа). Иначе тихо пропускает."""
+async def _send_shadow_kruzhok(message: Message, code: str) -> bool:
+    """Видео-кружок Алёны про её Тень (если готов). True — отправлен, False — нет."""
     fid = _KRUZHOK_FILE_IDS.get(code)
     if not fid:
-        return
+        return False
     try:
+        await message.bot.send_chat_action(message.chat.id, "record_video_note")
         await message.answer_video_note(fid)
+        return True
     except Exception:
         logger.warning("shadow kruzhok send failed for %s", code, exc_info=True)
+        return False
 
 
 @router.message(F.photo)
@@ -373,8 +387,9 @@ async def on_photo(message: Message):
             "Пришли фото ещё раз чуть позже, и я нарисую твою Тень акварелью.)_",
             parse_mode="Markdown",
         )
+        kruzhok_shown = await _send_shadow_kruzhok(message, code)
         from alena_chat import open_shadow_session
-        if not await open_shadow_session(message, message.from_user, code):
+        if not await open_shadow_session(message, message.from_user, code, video_hook=kruzhok_shown):
             await message.answer(
                 "Твой архетип — это *Тень*: где ты защищаешься сейчас.\n\n"
                 "Хочешь поговорить про неё начистоту — бесплатная встреча: /alena\n\n"
@@ -405,12 +420,12 @@ async def on_photo(message: Message):
                 "Сохрани или открой в HD — кнопка ниже.",
         reply_markup=kbd,
     )
-    # Видео-кружок про её Тень (если готов для архетипа) — вовлекающий момент перед хуком.
-    await _send_shadow_kruzhok(message, code)
+    # Видео-кружок про её Тень (вовлекающий момент перед хуком, если готов для архетипа).
+    kruzhok_shown = await _send_shadow_kruzhok(message, code)
     # Тёплый авто-контакт: Алёна САМА открывает встречу с хуком под его Тень и
-    # докручивает в Клуб (архетип уже втекает в on_alena_talk). Фолбэк — прежнее меню.
+    # докручивает в Клуб. Если кружок уже показал Тень — текстовый хук сокращаем.
     from alena_chat import open_shadow_session
-    if not await open_shadow_session(message, message.from_user, code):
+    if not await open_shadow_session(message, message.from_user, code, video_hook=kruzhok_shown):
         await message.answer(
             "Твой архетип — это *Тень*: где ты защищаешься сейчас, в какой маске застряла.\n\n"
             "Путь сквозь неё — *карта 5 поворотов*. Хочешь поговорить про свою Тень "

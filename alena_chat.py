@@ -153,7 +153,14 @@ def _shadow_opener(code: str) -> str:
     return f"Вижу твою ведущую Тень — {a['name']}.\n\n{a['teaser']}\n\n{q}\n\n— Алёна"
 
 
-async def open_shadow_session(target: Message, user, code: str) -> bool:
+def _shadow_opener_short() -> str:
+    # Когда видео-кружок уже показал её Тень и задал вопрос — не дублируем текстом,
+    # просто мягко зовём ответить (в т.ч. голосом).
+    return "Я здесь, слушаю.\n\nОтвечай, как есть — можно словами, можно голосовым."
+
+
+async def open_shadow_session(target: Message, user, code: str,
+                              video_hook: bool = False) -> bool:
     """Сразу после портрета Тени — Алёна САМА открывает встречу с хуком под архетип.
 
     True  → встреча открыта (дальше говорит on_alena_talk, архетип уже втекает),
@@ -178,7 +185,9 @@ async def open_shadow_session(target: Message, user, code: str) -> bool:
     if await ai_total_sessions(user.id) <= 1:
         await target.answer(DISCLAIMER)
     # Первый контакт — «вживую»: печатает → приходит пузырями (эффект присутствия).
-    await _send_alive(target, _shadow_opener(code), _pause_kbd())
+    # Если видео-кружок уже показал Тень — текстовый хук короткий, без дубля.
+    opener = _shadow_opener_short() if video_hook else _shadow_opener(code)
+    await _send_alive(target, opener, _pause_kbd())
     return True
 
 
