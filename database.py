@@ -366,9 +366,12 @@ async def source_stats():
             "COUNT(*) AS users, "
             "SUM(CASE WHEN u.shadow_dist IS NOT NULL THEN 1 ELSE 0 END) AS test_passed, "
             "SUM(CASE WHEN g.tg_id IS NOT NULL THEN 1 ELSE 0 END) AS portrait, "
+            "SUM(CASE WHEN s.tg_id IS NOT NULL THEN 1 ELSE 0 END) AS talked, "
+            "SUM(CASE WHEN u.last_ai_request IS NOT NULL THEN 1 ELSE 0 END) AS req, "
             "SUM(CASE WHEN p.tg_id IS NOT NULL THEN 1 ELSE 0 END) AS paid "
             "FROM users u "
             "LEFT JOIN shadow_generations g ON g.tg_id = u.tg_id "
+            "LEFT JOIN (SELECT DISTINCT tg_id FROM ai_sessions) s ON s.tg_id = u.tg_id "
             "LEFT JOIN (SELECT tg_id FROM subscriptions UNION SELECT tg_id FROM purchases) p "
             "  ON p.tg_id = u.tg_id "
             "GROUP BY u.source ORDER BY users DESC",

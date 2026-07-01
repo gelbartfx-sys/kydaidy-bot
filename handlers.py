@@ -770,17 +770,26 @@ async def cmd_sources(message: Message):
     total = sum(_i(r, "users") for r in rows)
     t_test = sum(_i(r, "test_passed") for r in rows)
     t_port = sum(_i(r, "portrait") for r in rows)
+    t_talk = sum(_i(r, "talked") for r in rows)
+    t_req = sum(_i(r, "req") for r in rows)
     t_paid = sum(_i(r, "paid") for r in rows)
     lines = ["📊 Воронка по источникам (first-touch)\n"
-             "источник: пришли → тест → портрет → оплата\n"]
+             "пришли → тест → портрет → 💬разговор → 🔥запрос → 💰оплата\n"]
     for r in rows:
-        u = _i(r, "users"); t = _i(r, "test_passed"); p = _i(r, "portrait"); pd = _i(r, "paid")
-        conv = f"{round(t / u * 100)}%" if u else "—"
-        lines.append(f"{r['source']}: {u} → {t} → {p} → 💰{pd}  (тест {conv})")
+        u = _i(r, "users"); t = _i(r, "test_passed"); p = _i(r, "portrait")
+        tk = _i(r, "talked"); rq = _i(r, "req"); pd = _i(r, "paid")
+        lines.append(f"{r['source']}: {u}→{t}→{p}→💬{tk}→🔥{rq}→💰{pd}")
+
+    def _pct(a, b): return f"{round(a / b * 100)}%" if b else "—"
     lines.append(
-        f"\nИтого: {total} пришли · {t_test} тест "
-        f"({round(t_test / total * 100) if total else 0}%) · "
-        f"{t_port} портрет · 💰{t_paid} оплат")
+        f"\nИтого: {total} пришли · {t_test} тест · {t_port} портрет · "
+        f"💬{t_talk} разговор · 🔥{t_req} запрос · 💰{t_paid} оплат")
+    # где рвётся — переходы между стадиями
+    lines.append(
+        "\nПереходы: тест " + _pct(t_test, total) +
+        " · портрет→разговор " + _pct(t_talk, t_port) +
+        " · разговор→запрос " + _pct(t_req, t_talk) +
+        " · запрос→💰 " + _pct(t_paid, t_req))
     await message.answer("\n".join(lines), parse_mode=None)
 
 
