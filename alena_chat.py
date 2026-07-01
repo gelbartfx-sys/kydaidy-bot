@@ -32,7 +32,7 @@ from database import (
     ai_active_session, ai_total_sessions,
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
     ai_close_session, ai_set_last_request, save_dossier,
-    ai_stale_sessions, ai_mark_nudged, save_lead_signals,
+    ai_stale_sessions, ai_mark_nudged, save_lead_signals, set_lead_track,
     get_client_model, save_client_model,
 )
 from alena_persona import (
@@ -40,6 +40,7 @@ from alena_persona import (
     extract_request, extract_dossier, extract_score,
 )
 from alena_brain import brain_turn
+from lead_policy import classify
 
 logger = logging.getLogger(__name__)
 alena_router = Router()
@@ -407,10 +408,13 @@ async def _talk(message: Message, text: str):
     # Мозг v2 (Фаза 1 ядра) — ТОЛЬКО за флагом. При OFF путь v1 нетронут.
     # Если brain_turn упал — фолбэк на v1 в том же ходе (try/except).
     reply = None
+    brain_signals = None      # скоринг из диагноза (brain-путь); в reply маркера нет
+    brain_track = None
     if settings.brain_v2_enabled:
         try:
             cm = await get_client_model(user.id)
-            reply, new_cm = await brain_turn(history, user.first_name, archetype, cm)
+            reply, new_cm, brain_signals, brain_track = await brain_turn(
+                history, user.first_name, archetype, cm)
             await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
         except Exception as e:
             logger.warning("brain_v2 turn failed for %s → fallback v1: %s", user.id, e,
@@ -436,11 +440,19 @@ async def _talk(message: Message, text: str):
     # Служебный маркер скоринга (Фаза 1): ВСЕГДА вырезаем из reply до отправки,
     # чтобы [[SCORE ...]] не утёк человеку; сигналы кладём в БД (крэш-сейф).
     reply, score = extract_score(reply)
-    if score:
+    # v1-путь: скоринг маркером [[SCORE]] в тексте. brain-путь: структурой из диагноза
+    # (в reply маркера нет). Берём то, что пришло этим ходом.
+    signals = score or brain_signals
+    if signals:
         await save_lead_signals(
             user.id,
-            heat=score.get("heat"), open_=score.get("open"),
-            resist=score.get("resist"), value=score.get("value"))
+            heat=signals.get("heat"), open_=signals.get("open"),
+            resist=signals.get("resist"), value=signals.get("value"))
+    # Трек лида (T1..T4) → колонка lead_track: топливо для /sources, догона и ворот
+    # бюджета кружков. brain отдаёт трек прямо; для v1 выводим из сигналов classify.
+    track = brain_track or (classify(signals) if signals else None)
+    if track:
+        await set_lead_track(user.id, track)
     if dossier_new:
         await save_dossier(user.id, dossier_new)
     await ai_add_message(sid, user.id, "model", reply)

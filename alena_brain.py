@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import logging
 
-import anthropic
-
 from config import settings
 from alena_persona import (
     build_diagnose_prompt, build_response_prompt, parse_diagnose_json,
@@ -43,14 +41,16 @@ _SAFE_DIRECTIVE = {
 }
 
 # Ленивый общий async-клиент. Читает ANTHROPIC_API_KEY из окружения (Render env).
-# Строим при первом вызове, чтобы импорт модуля не падал, когда ключа нет
-# (локально / флаг OFF). Любой сбой конструктора ловится в вызывающих try.
-_client: anthropic.AsyncAnthropic | None = None
+# Строим при первом вызове; и сам пакет anthropic импортируем лениво — чтобы импорт
+# модуля не падал там, где пакета/ключа нет (локальные офлайн-тесты, флаг OFF).
+# Любой сбой импорта/конструктора ловится в вызывающих try → фолбэк на v1.
+_client = None
 
 
-def _get_client() -> anthropic.AsyncAnthropic:
+def _get_client():
     global _client
     if _client is None:
+        import anthropic  # ленивый импорт: на Render пакет есть, локально не нужен
         _client = anthropic.AsyncAnthropic()  # ANTHROPIC_API_KEY из env
     return _client
 
@@ -61,6 +61,29 @@ def _default_diagnosis() -> dict:
     d["client_model"] = {}
     d["score"] = {}
     return d
+
+
+# Скоринг диагноза приходит русскими ключами (ж/о/с/ц) — схема build_diagnose_prompt.
+# save_lead_signals ждёт EN (heat/open/resist/value). Маппим здесь, где живёт схема.
+_SCORE_EN = {
+    "ж": "heat", "о": "open", "с": "resist", "ц": "value",
+    "heat": "heat", "open": "open", "resist": "resist", "value": "value",
+}
+
+
+def score_to_signals(score: dict | None) -> dict:
+    """{ж,о,с,ц|heat,…}(0–3) → {heat,open,resist,value} (только валидные поля)."""
+    out: dict = {}
+    if isinstance(score, dict):
+        for k, v in score.items():
+            ek = _SCORE_EN.get(str(k).strip().lower())
+            if not ek or ek in out:
+                continue
+            try:
+                out[ek] = int(v)
+            except (TypeError, ValueError):
+                continue
+    return out
 
 
 def _to_claude_messages(history: list[dict]) -> list[dict]:
@@ -162,12 +185,15 @@ async def respond(directive: str, method_phase: str, name, archetype,
 
 
 async def brain_turn(history: list[dict], name, archetype,
-                     client_model: dict | None) -> tuple[str, dict]:
+                     client_model: dict | None) -> tuple[str, dict, dict, str | None]:
     """Полный ход мозга v2: диагноз → ответ.
 
-    → (reply Алёны, обновлённая модель клиентки как dict).
-    diagnose() крэш-сейф внутри. respond() может бросить — тогда бросаем наверх,
-    вызывающий (_talk) фолбэчит на v1-путь в том же ходе."""
+    → (reply Алёны, обновлённая модель клиентки, сигналы лида {heat,open,resist,value},
+       трек 'T1'..'T4'|None).
+    Скоринг диагноза (score) РАНЬШЕ выбрасывался — теперь отдаём наверх, чтобы _talk
+    записал lead-сигналы и трек (без этого закрытие на Клуб шло без топлива, а /sources
+    был слеп к 🔥). diagnose() крэш-сейф внутри. respond() может бросить — тогда бросаем
+    наверх, вызывающий (_talk) фолбэчит на v1-путь в том же ходе."""
     dx = await diagnose(history, name, archetype, client_model)
     reply = await respond(dx.get("directive"), dx.get("method_phase"),
                           name, archetype, history)
@@ -179,4 +205,7 @@ async def brain_turn(history: list[dict], name, archetype,
         cm.update(new_cm)
     cm["method_phase"] = dx.get("method_phase")
     cm["track"] = dx.get("track")
-    return reply, cm
+
+    signals = score_to_signals(dx.get("score"))
+    track = dx.get("track") if isinstance(dx.get("track"), str) and dx.get("track") else None
+    return reply, cm, signals, track

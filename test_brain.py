@@ -11,7 +11,8 @@ os.environ.setdefault("TG_BOT_TOKEN", "test:token")
 os.environ.setdefault("TG_ADMIN_ID", "0")
 
 from alena_persona import parse_diagnose_json, METHOD_PHASES
-from alena_brain import _default_diagnosis
+from alena_brain import _default_diagnosis, score_to_signals
+from lead_policy import classify
 
 _VALID = '{"client_model":{"pattern":"избегает близости"},"score":{"ж":1,"о":2,"с":1,"ц":2},"method_phase":"contact","directive":"признай чувство","medium":"text","track":"T2"}'
 
@@ -57,9 +58,25 @@ def test_default_valid():
     assert _default_diagnosis()["client_model"] == {}, "дефолт не мутируется"
 
 
+def test_score_to_signals():
+    # русские ключи диагноза → EN для save_lead_signals
+    s = score_to_signals({"ж": 3, "о": 2, "с": 0, "ц": 3})
+    assert s == {"heat": 3, "open": 2, "resist": 0, "value": 3}, s
+    # трек из этих сигналов: value=3 → T4 (кит)
+    assert classify(s) == "T4", classify(s)
+    # EN-ключи тоже принимаются (толерантность к схеме модели)
+    assert score_to_signals({"heat": 1})["heat"] == 1
+    # мусор/None/нечисло → пропускаем поле, не падаем
+    assert score_to_signals(None) == {}
+    assert score_to_signals({"ж": "нет", "о": 1}) == {"open": 1}
+    # частичный скоринг: classify толерантен к отсутствующим полям
+    assert classify(score_to_signals({"ж": 3, "о": 3})) in ("T1", "T2")
+
+
 if __name__ == "__main__":
     test_valid()
     test_wrapped()
     test_broken()
     test_default_valid()
-    print("OK: parse_diagnose_json (valid/wrapped/broken) + safe default valid")
+    test_score_to_signals()
+    print("OK: parse_diagnose_json + safe default + score_to_signals→lead track wire")
