@@ -209,6 +209,10 @@ _RUNTIME_MIGRATIONS = (
     # ALTER упадёт «duplicate column» после первого прогона — это ловится
     # try/except в init_db (деградирует только эта фича).
     "ALTER TABLE users ADD COLUMN last_ai_request TEXT",
+    # Атрибуция источника трафика (deep-link /start <tag>): first-touch.
+    # Цель — видеть, какой канал реально гонит квизы Тени. Те же try/except.
+    "ALTER TABLE users ADD COLUMN source TEXT",
+    "ALTER TABLE users ADD COLUMN source_at TIMESTAMP",
     # ── Контент-конвейер (курирование Алёной + автопостинг) ──────────────────
     """CREATE TABLE IF NOT EXISTS content_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -239,6 +243,19 @@ _RUNTIME_MIGRATIONS = (
         status TEXT DEFAULT 'queued',
         queued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         posted_at TIMESTAMP
+    )""",
+    # ── Hermes-руки: реактивация застрявших лидов (режим ревью) ──────────────
+    # Когда юзера в последний раз трогали реактивацией — антиспам-кулдаун.
+    "ALTER TABLE users ADD COLUMN reactivated_at TIMESTAMP",
+    # Черновики нуджей: бот генерит → Кай одобряет кнопкой → бот шлёт юзеру.
+    """CREATE TABLE IF NOT EXISTS growth_drafts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER,
+        segment TEXT,
+        draft TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        decided_at TIMESTAMP
     )""",
 )
 
@@ -295,6 +312,49 @@ async def ai_set_last_request(tg_id: int, request: str | None):
         )
     except Exception:
         logger.warning("ai_set_last_request failed (continuing)", exc_info=True)
+
+
+async def set_user_source(tg_id: int, source: str | None):
+    """First-touch атрибуция: пишем источник только если он ещё не записан.
+
+    Крэш-сейф: если колонок ещё нет (миграция не докатилась) — деградируем
+    тихо, не ломая /start. Требует, чтобы строка users уже была (upsert_user
+    вызывается раньше в обоих /start-хендлерах).
+    """
+    if not source:
+        return
+    try:
+        await _exec(
+            "UPDATE users SET source = ?, source_at = CURRENT_TIMESTAMP "
+            "WHERE tg_id = ? AND source IS NULL",
+            (source, tg_id),
+        )
+    except Exception:
+        logger.warning("set_user_source failed (continuing)", exc_info=True)
+
+
+async def source_stats():
+    """Воронка по источникам (трекинг трафика): пришли → прошли тест Тени → получили портрет → оплатили.
+
+    FIX 01.07: раньше «квиз» мерился по povorot (legacy-флоу), которого в shadow-воронке НЕТ →
+    у всего трафика было quiz=0. Теперь: test = shadow_dist задан; portrait = есть в shadow_generations;
+    paid = есть подписка или покупка. Крэш-сейф."""
+    try:
+        return await _exec(
+            "SELECT COALESCE(u.source, '(прямой/нет метки)') AS source, "
+            "COUNT(*) AS users, "
+            "SUM(CASE WHEN u.shadow_dist IS NOT NULL THEN 1 ELSE 0 END) AS test_passed, "
+            "SUM(CASE WHEN g.tg_id IS NOT NULL THEN 1 ELSE 0 END) AS portrait, "
+            "SUM(CASE WHEN p.tg_id IS NOT NULL THEN 1 ELSE 0 END) AS paid "
+            "FROM users u "
+            "LEFT JOIN shadow_generations g ON g.tg_id = u.tg_id "
+            "LEFT JOIN (SELECT tg_id FROM subscriptions UNION SELECT tg_id FROM purchases) p "
+            "  ON p.tg_id = u.tg_id "
+            "GROUP BY u.source ORDER BY users DESC",
+            fetch="all") or []
+    except Exception:
+        logger.warning("source_stats failed (continuing)", exc_info=True)
+        return []
 
 
 async def save_shadow_dist(tg_id: int, dist: str):
@@ -627,3 +687,95 @@ async def pq_counts():
         "SELECT channel, COUNT(*) AS n FROM post_queue WHERE status = 'queued' "
         "GROUP BY channel", fetch="all") or []
     return {r["channel"]: int(r["n"]) for r in rows}
+
+
+# ── Hermes-руки: реактивация застрявших лидов ────────────────────────────────
+# Три сегмента «застрял»:
+#   quiz_no_alena — прошёл тест Тени (povorot), но не открывал AI-встречу /alena;
+#   alena_no_buy  — был на AI-встрече, но ничего не купил (нет подписки/покупки);
+#   club_churn    — был в Клубе, отписался (нет активной подписки).
+# Кандидаты исключают тех, кого недавно трогали (cooldown) и у кого уже есть
+# незакрытый черновик.
+
+_GROWTH_SEGMENT_SQL = {
+    "quiz_no_alena": (
+        "povorot IS NOT NULL "
+        "AND tg_id NOT IN (SELECT DISTINCT tg_id FROM ai_sessions)"
+    ),
+    "alena_no_buy": (
+        "tg_id IN (SELECT DISTINCT tg_id FROM ai_sessions) "
+        "AND tg_id NOT IN (SELECT tg_id FROM subscriptions WHERE active = 1) "
+        "AND tg_id NOT IN (SELECT tg_id FROM purchases)"
+    ),
+    "club_churn": (
+        "tg_id IN (SELECT tg_id FROM subscriptions "
+        "          WHERE active = 0 OR cancelled_at IS NOT NULL) "
+        "AND tg_id NOT IN (SELECT tg_id FROM subscriptions WHERE active = 1)"
+    ),
+}
+
+
+async def growth_candidates(segment: str, cooldown_days: int, limit: int):
+    """Кандидаты на реактивацию в сегменте. Crash-safe: при отсутствии колонок
+    (миграция не докатилась) возвращаем пусто, не роняя джоб."""
+    cond = _GROWTH_SEGMENT_SQL.get(segment)
+    if not cond:
+        return []
+    cd = int(cooldown_days)
+    lim = int(limit)
+    sql = (
+        f"SELECT * FROM users WHERE {cond} "
+        f"AND (reactivated_at IS NULL "
+        f"     OR datetime(reactivated_at, '+{cd} days') < datetime('now')) "
+        f"AND tg_id NOT IN (SELECT tg_id FROM growth_drafts "
+        f"                  WHERE status IN ('pending','approved','sent')) "
+        f"ORDER BY created_at DESC LIMIT {lim}"
+    )
+    try:
+        return await _exec(sql, fetch="all") or []
+    except Exception:
+        logger.warning("growth_candidates(%s) failed (continuing)", segment, exc_info=True)
+        return []
+
+
+async def growth_add_draft(tg_id: int, segment: str, draft: str):
+    await _exec(
+        "INSERT INTO growth_drafts (tg_id, segment, draft) VALUES (?, ?, ?)",
+        (tg_id, segment, draft))
+    return await _exec(
+        "SELECT * FROM growth_drafts WHERE tg_id = ? AND segment = ? "
+        "ORDER BY id DESC LIMIT 1", (tg_id, segment), fetch="one")
+
+
+async def growth_get_draft(draft_id: int):
+    return await _exec(
+        "SELECT * FROM growth_drafts WHERE id = ?", (draft_id,), fetch="one")
+
+
+async def growth_set_status(draft_id: int, status: str):
+    await _exec(
+        "UPDATE growth_drafts SET status = ?, decided_at = CURRENT_TIMESTAMP "
+        "WHERE id = ?", (status, draft_id))
+
+
+async def growth_update_draft(draft_id: int, text: str):
+    await _exec(
+        "UPDATE growth_drafts SET draft = ? WHERE id = ?", (text, draft_id))
+
+
+async def mark_reactivated(tg_id: int):
+    """Антиспам-метка: юзера тронули реактивацией (ставим при создании черновика,
+    чтобы следующий прогон его не выбрал снова)."""
+    try:
+        await _exec(
+            "UPDATE users SET reactivated_at = CURRENT_TIMESTAMP WHERE tg_id = ?",
+            (tg_id,))
+    except Exception:
+        logger.warning("mark_reactivated failed (continuing)", exc_info=True)
+
+
+async def growth_counts():
+    rows = await _exec(
+        "SELECT status, COUNT(*) AS n FROM growth_drafts GROUP BY status",
+        fetch="all") or []
+    return {r["status"]: int(r["n"]) for r in rows}

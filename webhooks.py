@@ -94,11 +94,40 @@ async def tally_webhook(request: web.Request) -> web.Response:
         return web.Response(status=500, text="error")
 
 
-async def tribute_webhook(request: web.Request) -> web.Response:
-    """Webhook от Tribute после оплаты.
+# Реальные имена событий Tribute (camelCase) + совместимость со старыми плоскими.
+_TRIBUTE_SUB_EVENTS = {"newSubscription", "renewedSubscription", "subscription.created"}
+_TRIBUTE_CANCEL_EVENTS = {"cancelledSubscription", "subscription.cancelled"}
+_TRIBUTE_DIGITAL_EVENTS = {"newDigitalProduct", "purchase.completed"}
 
-    Tribute отправляет signed payload с product_code, amount, user_telegram_id.
-    """
+
+def _tribute_product_code(event: str, payload: dict) -> str | None:
+    """Tribute НЕ шлёт наш product_code → маппим сами: подписку по каналу, цифровой продукт по имени."""
+    if event in _TRIBUTE_SUB_EVENTS or event in _TRIBUTE_CANCEL_EVENTS:
+        ch = payload.get("channel_id")
+        try:
+            if ch is not None and settings.manifest_club_channel_id and int(ch) == settings.manifest_club_channel_id:
+                return "manifest_club"
+        except (TypeError, ValueError):
+            pass
+        return "manifest_club"  # сейчас единственная подписка
+    if event in _TRIBUTE_DIGITAL_EVENTS:
+        name = str(payload.get("product_name") or payload.get("digital_product_name")
+                   or payload.get("subscription_name") or "").lower()
+        if any(k in name for k in ("1:1", "1 на 1", "1on1", "сесс", "встреч", "консульт", "созвон")):
+            return "manifest_1on1"
+        if any(k in name for k in ("воркбук", "манифест 7", "манифест7", "7 повор", "карта")):
+            return "manifest_7"
+        # неизвестный цифровой продукт — по цене (1:1 дороже воркбука), иначе None (залогируем)
+        amt = int(payload.get("amount") or payload.get("price") or 0)
+        if amt >= settings.manifest_7_price * 2:
+            return "manifest_1on1"
+        if amt >= settings.manifest_7_price:
+            return "manifest_7"
+    return None
+
+
+async def tribute_webhook(request: web.Request) -> web.Response:
+    """Webhook от Tribute после оплаты (реальный формат: name + вложенный payload)."""
     try:
         body = await request.read()
 
@@ -108,28 +137,39 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             return web.Response(status=403, text="invalid signature")
 
         data = json.loads(body)
-        event_type = data.get("event")
+        # Реальный Tribute: событие в "name" (camelCase: newSubscription/newDigitalProduct/...),
+        # данные во вложенном "payload". Старый плоский формат ("event"/поля в корне) — тоже поддержим.
+        event = data.get("name") or data.get("event")
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else data
 
-        if event_type is None:
-            logger.info(f"Tribute test webhook OK: {body[:200]!r}")
+        if not event:
+            logger.info(f"Tribute test/ping webhook OK: {body[:200]!r}")
             return web.Response(status=200, text="ok")
 
-        tg_id = int(data.get("user_telegram_id", 0))
-        product_code = data.get("product_code")
-        amount = int(data.get("amount", 0))
-        payment_id = data.get("payment_id")
+        # ВСЕГДА логируем сырой payload — чтобы видеть реальные имена продуктов и точно замапить.
+        logger.info("Tribute event=%s payload=%s", event, json.dumps(payload, ensure_ascii=False)[:400])
 
-        if event_type == "purchase.completed":
-            await add_purchase(tg_id, product_code, amount, payment_id)
-            await _grant_access(request.app["bot"], tg_id, product_code)
+        tg_id = int(payload.get("telegram_user_id") or payload.get("user_telegram_id") or 0)
+        amount = int(payload.get("amount") or payload.get("price") or 0)
+        payment_id = str(payload.get("subscription_id") or payload.get("order_id")
+                         or payload.get("payment_id") or "")
+        code = _tribute_product_code(event, payload)
 
-        elif event_type == "subscription.created":
-            await add_subscription(tg_id, product_code)
-            await _grant_access(request.app["bot"], tg_id, product_code)
+        if not tg_id or not code:
+            logger.warning("Tribute event=%s не замаплен (tg_id=%s code=%s) payload=%s",
+                           event, tg_id, code, json.dumps(payload, ensure_ascii=False)[:400])
+            return web.Response(status=200, text="ok")  # 200 — чтобы Tribute не ретраил бесконечно
 
-        elif event_type == "subscription.cancelled":
-            # тут логика отзыва доступа
-            pass
+        if event in _TRIBUTE_SUB_EVENTS:
+            await add_subscription(tg_id, code)
+            await _grant_access(request.app["bot"], tg_id, code)
+            logger.info("Tribute: подписка %s выдана %s", code, tg_id)
+        elif event in _TRIBUTE_DIGITAL_EVENTS:
+            await add_purchase(tg_id, code, amount, payment_id)
+            await _grant_access(request.app["bot"], tg_id, code)
+            logger.info("Tribute: продукт %s выдан %s", code, tg_id)
+        elif event in _TRIBUTE_CANCEL_EVENTS:
+            logger.info("Tribute: отмена %s у %s (отзыв доступа — TODO)", code, tg_id)
 
         return web.Response(status=200, text="ok")
     except Exception as e:

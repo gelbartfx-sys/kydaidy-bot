@@ -41,6 +41,7 @@ from database import (
     upsert_user, get_user, start_nurture, stop_nurture, get_user_purchases,
     set_tribute_post, get_tribute_post,
     has_generated_shadow, mark_shadow_generated, save_shadow_dist,
+    set_user_source, source_stats,
 )
 from content_data import (
     POVOROT_RESULTS,
@@ -64,6 +65,50 @@ PRODUCT_BUY_URLS = {
     "manifest_1on1": ("Записаться",  "https://web.tribute.tg/p/vKG"),
 }
 
+# ── Атрибуция источника трафика (deep-link /start <tag>) ─────────────────────
+# Канонический формат ссылки контента: t.me/kydaidy_bot?start=<tag>
+# (напр. ?start=threads) — бэр-токен. Можно и суффиксом к другому deep-link
+# через «__»: ?start=s_ABCDE__pin (источник + сразу тест Тени из пина).
+# Telegram разрешает в start-параметре только [A-Za-z0-9_-], поэтому «__».
+SOURCE_TAGS = {
+    "threads", "pin", "pinterest", "dzen", "zen", "video", "reels", "shorts",
+    "tg", "telegram", "ig", "inst", "instagram", "yt", "youtube", "vk", "site",
+    "bio", "rutube",
+}
+# Нормализация синонимов к одному имени канала.
+_SOURCE_ALIAS = {
+    "pin": "pinterest", "zen": "dzen", "inst": "instagram", "ig": "instagram",
+    "yt": "youtube", "tg": "telegram", "reels": "video", "shorts": "video",
+}
+
+
+def _split_source(args: str) -> tuple[str, str | None]:
+    """(core_args, source). Отрезает источник: суффикс «__tag» или весь бэр-токен.
+
+    Не ломает существующие deep-link (s_/shadow_/povorot): если метки нет —
+    возвращает args как есть и source=None."""
+    if not args:
+        return args, None
+
+    def _norm(tok: str) -> str | None:
+        t = tok.strip().lower()
+        if t.startswith("src_") or t.startswith("src-"):
+            t = t[4:]
+        if t in SOURCE_TAGS:
+            return _SOURCE_ALIAS.get(t, t)
+        return None
+
+    if "__" in args:
+        core, _, tail = args.rpartition("__")
+        tag = _norm(tail)
+        if tag:
+            return core, tag
+    bare = _norm(args)
+    if bare:
+        return "", bare
+    return args, None
+
+
 logger = logging.getLogger(__name__)
 router = Router()
 
@@ -71,6 +116,33 @@ router = Router()
 # In-memory: генерация идёт сразу после фото в той же сессии; переживать рестарт
 # Render free не требуется (если потеряется — бот мягко попросит пройти тест заново).
 _pending_shadow: dict[int, str] = {}
+
+# --- рост ТГ-канала: подписка ---
+_CHANNEL = settings.tg_channel_id                       # "@kydaidy" (для getChatMember)
+_CHANNEL_URL = "https://t.me/" + _CHANNEL.lstrip("@")
+
+
+async def _is_subscribed(bot, tg_id: int) -> bool:
+    """Подписан ли юзер на публичный канал. Бот должен быть участником/админом канала —
+    иначе get_chat_member падает, и мы мягко считаем «не подписан» (призыв всё равно показан)."""
+    try:
+        m = await bot.get_chat_member(_CHANNEL, tg_id)
+        return getattr(m, "status", "") in ("member", "administrator", "creator")
+    except Exception:
+        logger.warning("get_chat_member(%s) failed (continuing)", _CHANNEL, exc_info=True)
+        return False
+
+
+@router.callback_query(F.data == "check_sub")
+async def cb_check_sub(cb: CallbackQuery):
+    if await _is_subscribed(cb.bot, cb.from_user.id):
+        await cb.answer("Готово 🤍")
+        await cb.message.answer(
+            "🤍 Вижу тебя в канале — спасибо, что рядом.\n\n"
+            "Если захочешь поговорить про свою Тень начистоту, у меня есть "
+            "бесплатная встреча: /alena")
+    else:
+        await cb.answer("Пока не вижу подписки — подпишись и жми ещё раз 🙏", show_alert=True)
 
 
 def _nurture_optin_keyboard() -> InlineKeyboardMarkup:
@@ -93,16 +165,49 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+# ── Навигация: «← Назад» / «🏠 Меню» (единый стиль на всех экранах) ───────────
+# callback "menu" ловит handlers.router (подключён последним) → срабатывает из
+# любого экрана/роутера (alena, guide). "← Назад" ведёт на родительский callback.
+def _home_btn() -> InlineKeyboardButton:
+    return InlineKeyboardButton(text="🏠 Меню", callback_data="menu")
+
+
+def _nav_row(back: str | None = None) -> list[InlineKeyboardButton]:
+    """Ряд навигации: опц. «← Назад» (на родительский callback) + «🏠 Меню»."""
+    row = []
+    if back:
+        row.append(InlineKeyboardButton(text="← Назад", callback_data=back))
+    row.append(_home_btn())
+    return row
+
+
+def _menu_only_kbd() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_home_btn()]])
+
+
+@router.callback_query(F.data == "menu")
+async def cb_menu(callback: CallbackQuery):
+    """Возврат в главное меню из любого экрана."""
+    await callback.message.answer(
+        "Главное меню. Куда идём?", reply_markup=_main_menu_keyboard())
+    await callback.answer()
+
+
 @router.message(CommandStart(deep_link=True))
 async def cmd_start_with_deeplink(message: Message, command: CommandObject):
-    """Старт с deeplink: /start povorot3 → карта; /start shadow_W → тест архетипов."""
+    """Старт с deeplink: /start povorot3 → карта; /start shadow_W → тест архетипов.
+
+    Дополнительно ловим метку источника трафика: бэр-токен (?start=threads)
+    или суффикс ?start=s_ABCDE__pin. First-touch — пишем только первый источник."""
     args = command.args or ""
     user = message.from_user
+    args, source = _split_source(args)
 
     # Тест тёмных архетипов с полным распределением: /start s_<10 символов>.
     if args.startswith("s_"):
         if decode_distribution(args[2:]):
             await upsert_user(user.id, user.username, user.first_name)
+            await set_user_source(user.id, source)
             await _prompt_shadow_photo(message, args[2:])
             return
 
@@ -111,6 +216,7 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         code = args[len("shadow_"):].upper()
         if code in ARCHETYPES:
             await upsert_user(user.id, user.username, user.first_name)
+            await set_user_source(user.id, source)
             await _prompt_shadow_photo(message, encode_distribution({code: 10}))
             return
 
@@ -124,6 +230,7 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
             povorot = None
 
     await upsert_user(user.id, user.username, user.first_name, povorot)
+    await set_user_source(user.id, source)
 
     if povorot:
         await _send_povorot_result(message, povorot)
@@ -219,6 +326,15 @@ async def on_photo(message: Message):
         "Сохрани картинку (зажми → «Сохранить») или открой в высоком качестве "
         "и поделись — кнопка ниже. Отметишь @kydaidy 🤍",
         reply_markup=kbd,
+    )
+    # рост канала: мягкий, но заметный призыв подписаться (в момент высокого внимания — сразу после портрета)
+    await message.answer(
+        "📿 Я почти каждый день пишу в канал — коротко про Тени, повороты и то, "
+        "как возвращаться к себе. Подпишись, чтобы не потерять дорогу 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📿 Подписаться на канал", url=_CHANNEL_URL)],
+            [InlineKeyboardButton(text="✓ Я подписалась", callback_data="check_sub")],
+        ]),
     )
     await message.answer(
         "Твой архетип — это *Тень*: где ты защищаешься сейчас, в какой маске застряла.\n\n"
@@ -325,6 +441,7 @@ def _products_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="💬 Алёна на связи — бесплатно", callback_data="alena")],
             [InlineKeyboardButton(text="✦ Клуб «Манифест» — 990 ₽/мес", callback_data="buy:manifest_club")],
             [InlineKeyboardButton(text="✦ «Манифест 1:1» — от 7 000 ₽", callback_data="buy:manifest_1on1")],
+            _nav_row(),
         ]
     )
 
@@ -362,7 +479,10 @@ async def show_one_product(callback: CallbackQuery):
     if src_chat and src_msg:
         # Add inline button manually — copyMessage doesn't preserve original keyboard
         label, url = PRODUCT_BUY_URLS[code]
-        kbd = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, url=url)]])
+        kbd = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=label, url=url)],
+            _nav_row(back="products"),
+        ])
         try:
             await bot.copy_message(
                 chat_id=user_id,
@@ -376,7 +496,9 @@ async def show_one_product(callback: CallbackQuery):
             logger.warning(f"copy_message failed for {code} (chat={src_chat} msg={src_msg}): {e}")
 
     # Fallback: текст со ссылкой-превью если пост ещё не захвачен / не доступен для копирования
-    await bot.send_message(user_id, PRODUCT_FALLBACKS[code], parse_mode="Markdown")
+    await bot.send_message(user_id, PRODUCT_FALLBACKS[code], parse_mode="Markdown",
+                           reply_markup=InlineKeyboardMarkup(
+                               inline_keyboard=[_nav_row(back="products")]))
     await callback.answer()
 
 
@@ -454,7 +576,8 @@ async def show_quiz(event):
         "«Какая Тень в тебе активна» — тест из 10 тёмных женских архетипов. "
         "10 вопросов, 5 минут.\n\n"
         "Пройди здесь: https://kydaidy.com/shadow\n\n"
-        "В конце пришли мне сюда своё фото — соберу твой архетипический профиль. Бесплатно."
+        "В конце пришли мне сюда своё фото — соберу твой архетипический профиль. Бесплатно.",
+        reply_markup=_menu_only_kbd(),
     )
     if isinstance(event, CallbackQuery):
         await event.answer()
@@ -470,7 +593,10 @@ async def show_cabinet(event):
     purchases = await get_user_purchases(target_user.id)
 
     if not user:
-        await target.answer("Кабинет пока пуст. Начни с /quiz")
+        await target.answer("Кабинет пока пуст. Начни с /quiz",
+                            reply_markup=_menu_only_kbd())
+        if isinstance(event, CallbackQuery):
+            await event.answer()
         return
 
     text = f"*Твой кабинет*\n\n"
@@ -483,7 +609,7 @@ async def show_cabinet(event):
     else:
         text += "\nПокупок пока нет.\n\nЕсли хочешь идти глубже: /products"
 
-    await target.answer(text, parse_mode="Markdown")
+    await target.answer(text, parse_mode="Markdown", reply_markup=_menu_only_kbd())
     if isinstance(event, CallbackQuery):
         await event.answer()
 
@@ -507,6 +633,39 @@ async def cmd_whoami(message: Message):
         f"id: `{u.id}`\nusername: @{u.username or '—'}\nбезлимит профиля: {unlimited}",
         parse_mode="Markdown",
     )
+
+
+@router.message(Command("sources"))
+async def cmd_sources(message: Message):
+    """Админ: сводка по источникам трафика и конверсии в тест Тени."""
+    if message.from_user.id != settings.tg_admin_id:
+        return
+    rows = await source_stats()
+    if not rows:
+        await message.answer(
+            "Данных по источникам пока нет.\n\n"
+            "Метить трафик: t.me/kydaidy_bot?start=<канал>\n"
+            "Каналы: threads · pinterest · dzen · video · telegram · instagram · "
+            "youtube · vk · site · bio\n"
+            "Можно и к ссылке теста: ?start=s_<код>__pinterest",
+            parse_mode=None)
+        return
+    def _i(r, k): return int(r.get(k) or 0)
+    total = sum(_i(r, "users") for r in rows)
+    t_test = sum(_i(r, "test_passed") for r in rows)
+    t_port = sum(_i(r, "portrait") for r in rows)
+    t_paid = sum(_i(r, "paid") for r in rows)
+    lines = ["📊 Воронка по источникам (first-touch)\n"
+             "источник: пришли → тест → портрет → оплата\n"]
+    for r in rows:
+        u = _i(r, "users"); t = _i(r, "test_passed"); p = _i(r, "portrait"); pd = _i(r, "paid")
+        conv = f"{round(t / u * 100)}%" if u else "—"
+        lines.append(f"{r['source']}: {u} → {t} → {p} → 💰{pd}  (тест {conv})")
+    lines.append(
+        f"\nИтого: {total} пришли · {t_test} тест "
+        f"({round(t_test / total * 100) if total else 0}%) · "
+        f"{t_port} портрет · 💰{t_paid} оплат")
+    await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(Command("help"))
