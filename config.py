@@ -25,9 +25,12 @@ class Settings(BaseSettings):
     # OFF by default: живой поток _talk() идёт старым путём v1, байт-в-байт как
     # сейчас, пока флаг не включён. Включается только когда ядро выверено.
     brain_v2_enabled: bool = False
-    # Проход-ДИАГНОЗ (аналитик): дорогая thinking-модель на КОМПАКТНОМ входе
-    # (модель клиентки + ~6 реплик). Проход-ОТВЕТ использует TEXT_MODEL (flash).
-    gemini_diagnose_model: str = "gemini-2.5-pro"
+    # Мозг Гермеса на Claude (Gemini pro упирался в квоту 429). Ключ —
+    # ANTHROPIC_API_KEY в env (SDK читает сам). Проход-ДИАГНОЗ (аналитик):
+    # Opus 4.8 + adaptive thinking на КОМПАКТНОМ входе. Проход-ОТВЕТ (голос
+    # Алёны): Haiku 4.5. См. docs/hermes/ai-coach-architecture.md.
+    brain_diagnose_model: str = "claude-opus-4-8"
+    brain_respond_model: str = "claude-haiku-4-5"
 
     webhook_base_url: str = ""
     webhook_path: str = "/tg-webhook"

@@ -1,25 +1,27 @@
-"""AI-Алёна «мозг v2» (Фаза 1 ядра) — 2-проход: ДИАГНОЗ → ОТВЕТ.
+"""AI-Алёна «мозг v2» (Фаза 1 ядра) — 2-проход: ДИАГНОЗ → ОТВЕТ. На Claude.
 
-Из рефлекс-ответчика (1 вызов Gemini/ход) → в мыслящий агент:
-  • ПРОХОД 1 — ДИАГНОЗ (Gemini pro, thinking вкл). Вход компактный (модель
-    клиентки + ~6 последних реплик). Выход — строгий JSON: обновлённая модель
-    клиентки + скоринг + фаза метода + директива хода. Человек его НЕ видит.
-  • ПРОХОД 2 — ОТВЕТ (Gemini flash, голос Алёны). Исполняет директиву её голосом.
+Из рефлекс-ответчика (1 вызов/ход) → в мыслящий агент:
+  • ПРОХОД 1 — ДИАГНОЗ (Claude Opus 4.8, adaptive thinking). Вход компактный
+    (модель клиентки + ~6 последних реплик). Выход — строгий JSON: обновлённая
+    модель клиентки + скоринг + фаза метода + директива хода. Человек его НЕ видит.
+  • ПРОХОД 2 — ОТВЕТ (Claude Haiku 4.5, голос Алёны). Исполняет директиву её голосом.
 
-Всё крэш-сейф: сбой диагноза/парса/сети → безопасный дефолт-директива, встреча
-не падает. Подключается в alena_chat._talk ТОЛЬКО за флагом settings.brain_v2_enabled.
-См. docs/hermes/ai-coach-architecture.md.
+Почему Claude, а не Gemini: gemini-2.5-pro упирался в квоту (429). Мозг Гермеса
+переведён на Anthropic SDK (решение Кая). Честно: скилы/плагины Claude Code сюда
+НЕ переносятся — это чистые вызовы модели; инструменты дал бы Claude Agent SDK.
+
+Всё крэш-сейф: сбой диагноза/парса/сети/ключа → безопасный дефолт-директива,
+встреча не падает. Подключается в alena_chat._talk ТОЛЬКО за флагом
+settings.brain_v2_enabled. См. docs/hermes/ai-coach-architecture.md.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 
-import aiohttp
+import anthropic
 
 from config import settings
-from ai_quiz import BASE, TEXT_MODEL
 from alena_persona import (
     build_diagnose_prompt, build_response_prompt, parse_diagnose_json,
     METHOD_PHASES,
@@ -27,7 +29,7 @@ from alena_persona import (
 
 logger = logging.getLogger(__name__)
 
-# Сколько последних реплик отдаём диагнозу (компактный вход → дёшево на pro-модели).
+# Сколько последних реплик отдаём диагнозу (компактный вход → дёшево на Opus).
 DIAGNOSE_HISTORY = 6
 
 # Безопасный дефолт директивы: при любом сбое диагноза встреча продолжается мягко.
@@ -40,6 +42,18 @@ _SAFE_DIRECTIVE = {
     "track": "T2",
 }
 
+# Ленивый общий async-клиент. Читает ANTHROPIC_API_KEY из окружения (Render env).
+# Строим при первом вызове, чтобы импорт модуля не падал, когда ключа нет
+# (локально / флаг OFF). Любой сбой конструктора ловится в вызывающих try.
+_client: anthropic.AsyncAnthropic | None = None
+
+
+def _get_client() -> anthropic.AsyncAnthropic:
+    global _client
+    if _client is None:
+        _client = anthropic.AsyncAnthropic()  # ANTHROPIC_API_KEY из env
+    return _client
+
 
 def _default_diagnosis() -> dict:
     """Свежая копия безопасного дефолта (без мутации общего словаря)."""
@@ -49,53 +63,71 @@ def _default_diagnosis() -> dict:
     return d
 
 
-def _contents(history: list[dict]) -> list[dict]:
-    """История бота (role: 'model'/'user') → формат Gemini contents."""
-    return [
-        {"role": ("model" if m.get("role") == "model" else "user"),
-         "parts": [{"text": m.get("content", "")}]}
-        for m in (history or [])
-    ]
+def _to_claude_messages(history: list[dict]) -> list[dict]:
+    """История бота (role 'model'/'user') → messages для Claude.
+
+    Claude требует: роли user/assistant, первая — user, соседние одной роли
+    склеиваем. Пустые реплики выкидываем. Ведущие assistant-реплики (Алёна
+    открыла встречу) отбрасываем, пока не встретим первую user-реплику."""
+    msgs: list[dict] = []
+    for m in (history or []):
+        text = (m.get("content") or "").strip()
+        if not text:
+            continue
+        role = "assistant" if m.get("role") == "model" else "user"
+        if not msgs and role == "assistant":
+            continue  # первым сообщением к Claude должен идти user
+        if msgs and msgs[-1]["role"] == role:
+            msgs[-1]["content"] += "\n\n" + text  # склеить соседей одной роли
+        else:
+            msgs.append({"role": role, "content": text})
+    return msgs
 
 
-async def _call_gemini(model: str, system: str, contents: list[dict],
-                       *, temperature: float, max_tokens: int,
-                       thinking_budget: int, timeout: int = 90) -> str:
-    """Один вызов Gemini generateContent → текст ответа (может бросить)."""
-    payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
-        "contents": contents,
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": max_tokens,
-            "thinkingConfig": {"thinkingBudget": thinking_budget},
-        },
+def _extract_text(message) -> str:
+    """Текст из ответа Claude: конкатенация text-блоков (thinking-блоки пропускаем)."""
+    return "".join(
+        b.text for b in message.content
+        if getattr(b, "type", None) == "text"
+    ).strip()
+
+
+async def _call_claude(model: str, system: str, messages: list[dict], *,
+                       max_tokens: int, thinking: dict | None = None,
+                       temperature: float | None = None,
+                       timeout: float = 90.0) -> str:
+    """Один вызов Claude messages.create → текст. Может бросить (ловит вызывающий)."""
+    if not messages:
+        raise RuntimeError("claude: пустая история")
+    kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": messages,
     }
-    url = f"{BASE}/models/{model}:generateContent?key={settings.gemini_key}"
-    async with aiohttp.ClientSession() as s:
-        async with s.post(url, json=payload,
-                          timeout=aiohttp.ClientTimeout(total=timeout)) as r:
-            body = await r.json()
-    if "candidates" not in body:
-        raise RuntimeError(f"gemini {model} failed: {json.dumps(body)[:300]}")
-    parts = body["candidates"][0].get("content", {}).get("parts", [])
-    text = "".join(p.get("text", "") for p in parts).strip()
+    if thinking is not None:
+        kwargs["thinking"] = thinking          # temperature с thinking не задаём
+    elif temperature is not None:
+        kwargs["temperature"] = temperature
+    message = await _get_client().messages.create(
+        **kwargs, timeout=timeout)
+    text = _extract_text(message)
     if not text:
-        raise RuntimeError(f"gemini {model} empty")
+        raise RuntimeError(f"claude {model} пустой ответ")
     return text
 
 
 async def diagnose(history: list[dict], name, archetype,
                    client_model: dict | None) -> dict:
-    """ПРОХОД 1 — диагноз (Gemini pro, thinking). → dict модели/директивы.
+    """ПРОХОД 1 — диагноз (Opus 4.8, adaptive thinking). → dict модели/директивы.
 
-    Крэш-сейф: любой сбой (сеть/парс/пустой ответ) → безопасный дефолт."""
+    Крэш-сейф: любой сбой (сеть/ключ/парс/пустой ответ) → безопасный дефолт."""
     try:
         system = build_diagnose_prompt(name, archetype, client_model)
-        contents = _contents((history or [])[-DIAGNOSE_HISTORY:])
-        raw = await _call_gemini(
-            settings.gemini_diagnose_model, system, contents,
-            temperature=0.4, max_tokens=2048, thinking_budget=1024)
+        messages = _to_claude_messages((history or [])[-DIAGNOSE_HISTORY:])
+        raw = await _call_claude(
+            settings.brain_diagnose_model, system, messages,
+            max_tokens=3000, thinking={"type": "adaptive"})
         data = parse_diagnose_json(raw)
     except Exception:
         logger.warning("brain diagnose failed (safe default)", exc_info=True)
@@ -121,14 +153,12 @@ async def diagnose(history: list[dict], name, archetype,
 
 async def respond(directive: str, method_phase: str, name, archetype,
                   history: list[dict]) -> str:
-    """ПРОХОД 2 — ответ голосом Алёны (Gemini flash), исполняет директиву.
-
-    maxOutputTokens как в alena_chat._generate (4096, thinkingBudget 1536)."""
+    """ПРОХОД 2 — ответ голосом Алёны (Haiku 4.5), исполняет директиву."""
     system = build_response_prompt(name, archetype, directive, method_phase)
-    contents = _contents(history)
-    return await _call_gemini(
-        TEXT_MODEL, system, contents,
-        temperature=0.9, max_tokens=4096, thinking_budget=1536, timeout=60)
+    messages = _to_claude_messages(history)
+    return await _call_claude(
+        settings.brain_respond_model, system, messages,
+        max_tokens=1500, temperature=0.9, timeout=60)
 
 
 async def brain_turn(history: list[dict], name, archetype,
