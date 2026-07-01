@@ -72,6 +72,29 @@ def circles_left(credits: int) -> int:
     return credits // CIRCLE_CREDITS if CIRCLE_CREDITS else 0
 
 
+async def probe() -> str:
+    """Диагностика (админ): что реально отдают эндпоинты — статус + сырой ответ.
+
+    Нужна, когда /credits показывает не то: сразу видно, какой эндпоинт жив и
+    какие поля в ответе. Ответ обрезаем (в нём только данные аккаунта Кая)."""
+    if not settings.heygen_api_key:
+        return "HEYGEN_API_KEY не задан"
+    headers = {"X-Api-Key": settings.heygen_api_key, "accept": "application/json"}
+    lines = []
+    for url in _ME_URLS:
+        tail = url.split("heygen.com", 1)[-1]
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers,
+                                 timeout=aiohttp.ClientTimeout(total=20)) as r:
+                    status = r.status
+                    text = await r.text()
+            lines.append(f"{tail} [{status}]: {text[:350]}")
+        except Exception as e:
+            lines.append(f"{tail} ERR: {e}")
+    return "\n".join(lines)
+
+
 def _alert_text(credits: int, urgent: bool) -> str:
     head = "🔴 HeyGen: кредиты почти кончились" if urgent else "🟡 HeyGen: кредиты на исходе"
     return (

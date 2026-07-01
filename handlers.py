@@ -763,7 +763,7 @@ async def cmd_credits(message: Message):
     """Админ: баланс HeyGen-кредитов по запросу — сколько живых кружков осталось."""
     if not _is_unlimited(message.from_user):
         return
-    from heygen_credits import get_credits, circles_left
+    from heygen_credits import get_credits, circles_left, probe
     if not settings.heygen_api_key:
         await message.answer(
             "HeyGen-мониторинг спит: не задан HEYGEN_API_KEY в env.\n"
@@ -771,16 +771,13 @@ async def cmd_credits(message: Message):
             parse_mode=None)
         return
     c = await get_credits()
-    if c is None:
-        await message.answer("HeyGen баланс сейчас недоступен (API молчит). Повтори позже.",
-                             parse_mode=None)
-        return
-    await message.answer(
-        f"💳 HeyGen: {c} кред ≈ {circles_left(c)} живых кружков.\n"
-        f"Голос Алёны — бесплатный, не тратит.\n"
-        f"Пороги алерта: {settings.credit_warn} (предупреждение) / "
-        f"{settings.credit_urgent} (срочно).",
-        parse_mode=None)
+    head = ("HeyGen баланс сейчас недоступен (API молчит)." if c is None
+            else f"💳 HeyGen: {c} кред ≈ {circles_left(c)} живых кружков.\n"
+                 f"Голос Алёны — бесплатный, не тратит.\n"
+                 f"Пороги алерта: {settings.credit_warn} / {settings.credit_urgent}.")
+    # Диагностика (пока калибруем эндпоинт): показываем, что реально отдаёт API.
+    diag = await probe()
+    await message.answer(f"{head}\n\n— диагностика —\n{diag}", parse_mode=None)
 
 
 @router.message(Command("stop"))
