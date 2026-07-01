@@ -280,9 +280,10 @@ async def _generate(history: list[dict], name, povorot, archetype,
         "contents": contents,
         "generationConfig": {
             "temperature": 0.9,
-            "maxOutputTokens": 1600,
-            # Мышление ВКЛючено (было 0) — глубже видит узор, ведёт умнее, доходит до продажи.
-            "thinkingConfig": {"thinkingBudget": 2048},
+            # maxOutputTokens ВКЛЮЧАЕТ токены мышления → должен быть заметно больше
+            # thinkingBudget, иначе видимый ответ обрывается на полуслове (баг «И…»).
+            "maxOutputTokens": 4096,
+            "thinkingConfig": {"thinkingBudget": 1536},
         },
     }
     url = f"{BASE}/models/{TEXT_MODEL}:generateContent?key={settings.gemini_key}"
