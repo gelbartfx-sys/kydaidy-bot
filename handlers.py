@@ -87,6 +87,14 @@ _SOURCE_ALIAS = {
 # Функциональные deep-link префиксы — их НИКОГДА не считаем источником.
 _FUNC_PREFIXES = ("s_", "shadow_", "povorot")
 
+# Человекочитаемые имена продуктов для /cabinet (product_code содержит «_»,
+# который ломает Markdown-разметку — показываем чистое имя).
+_PRODUCT_TITLES = {
+    "manifest_club": "Клуб «Манифест»",
+    "manifest_1on1": "«Манифест 1:1»",
+    "manifest_7": "«Манифест 7»",
+}
+
 
 def _split_source(args: str) -> tuple[str, str | None]:
     """(core_args, source). Отрезает источник: суффикс «__tag» или весь бэр-токен.
@@ -261,6 +269,13 @@ async def _prompt_shadow_photo(message: Message, dist: str):
     code = winner_from_counts(decode_distribution(dist))
     a = ARCHETYPES[code]
     _pending_shadow[message.from_user.id] = dist
+    # Персистим распределение в БД СРАЗУ: Render free усыпляет/редеплоит контейнер,
+    # in-memory _pending_shadow теряется → фото пришло бы «в пустоту» и юзера
+    # футболило обратно на сайт. shadow_dist в БД = фолбэк в on_photo.
+    try:
+        await save_shadow_dist(message.from_user.id, dist)
+    except Exception:
+        logger.warning("persist shadow_dist failed (continuing)", exc_info=True)
     await message.answer(
         f"🌑 Твоя ведущая Тень — *{a['name']}* _({a['too']})_.\n\n"
         f"{a['tag']}\n\n"
@@ -277,6 +292,14 @@ async def on_photo(message: Message):
     """Фото после теста → clean-портрет Тени + разбор + ссылка на полный профиль."""
     tg_id = message.from_user.id
     dist = _pending_shadow.get(tg_id)
+    if not dist:
+        # Фолбэк на БД: контейнер Render мог уснуть/редеплоиться после теста →
+        # память пуста, но распределение персистнуто в _prompt_shadow_photo.
+        try:
+            u = await get_user(tg_id)
+            dist = (u or {}).get("shadow_dist")
+        except Exception:
+            logger.warning("shadow_dist DB fallback failed", exc_info=True)
     if not dist:
         await message.answer(
             "Спасибо за фото 🙏 Сначала пройди тест «Какая Тень в тебе активна» — "
@@ -647,11 +670,23 @@ async def show_cabinet(event):
     if purchases:
         text += "\n*Покупки:*\n"
         for p in purchases:
-            text += f"  • {p['product_code']} — {p['amount']} ₽\n"
+            # product_code (напр. manifest_club) содержит «_» → непарный Markdown-италик
+            # ронял весь /cabinet (Telegram 400) у купивших. Убираем «_» из динамики +
+            # человекочитаемое имя.
+            name = _PRODUCT_TITLES.get(
+                p["product_code"], str(p["product_code"]).replace("_", " "))
+            text += f"  • {name} — {p['amount']} ₽\n"
     else:
         text += "\nПокупок пока нет.\n\nЕсли хочешь идти глубже: /products"
 
-    await target.answer(text, parse_mode="Markdown", reply_markup=_menu_only_kbd())
+    try:
+        await target.answer(text, parse_mode="Markdown", reply_markup=_menu_only_kbd())
+    except Exception:
+        # Предохранитель: любая Markdown-сущность в динамике не должна ронять кабинет —
+        # шлём тем же текстом без разметки.
+        logger.warning("cabinet Markdown parse failed — fallback to plain", exc_info=True)
+        await target.answer(text.replace("*", ""), parse_mode=None,
+                            reply_markup=_menu_only_kbd())
     if isinstance(event, CallbackQuery):
         await event.answer()
 

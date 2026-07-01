@@ -158,6 +158,12 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         if not tg_id or not code:
             logger.warning("Tribute event=%s не замаплен (tg_id=%s code=%s) payload=%s",
                            event, tg_id, code, json.dumps(payload, ensure_ascii=False)[:400])
+            # НЕ теряем оплату молча: зовём админа выдать доступ руками + доточить маппинг.
+            await _notify_admin(request.app["bot"],
+                "⚠️ Оплата Tribute пришла, но доступ НЕ выдан (не замаплено).\n"
+                f"event={event} · tg_id={tg_id or '—'} · code={code or '—'} · amount={amount}\n"
+                f"payload={json.dumps(payload, ensure_ascii=False)[:600]}\n"
+                "→ Выдай доступ вручную и скажи мне — доточу маппинг.")
             return web.Response(status=200, text="ok")  # 200 — чтобы Tribute не ретраил бесконечно
 
         if event in _TRIBUTE_SUB_EVENTS:
@@ -249,6 +255,16 @@ async def _create_personal_invite(bot: Bot, channel_id: int, tg_id: int, product
         return None
 
 
+async def _notify_admin(bot: Bot, text: str):
+    """Безопасно уведомить админа (Кая). Никогда не роняет обработку вебхука."""
+    if not settings.tg_admin_id:
+        return
+    try:
+        await bot.send_message(settings.tg_admin_id, text)
+    except Exception:
+        logger.warning("admin notify failed (continuing)", exc_info=True)
+
+
 async def _grant_access(bot: Bot, tg_id: int, product_code: str):
     """Выдать доступ к продукту после оплаты.
 
@@ -281,20 +297,23 @@ async def _grant_access(bot: Bot, tg_id: int, product_code: str):
 
     text += "\n\n— Алёна"
 
+    sent = True
     try:
         await bot.send_message(tg_id, text)
     except Exception as e:
+        sent = False
         logger.error(f"Failed to send access message to {tg_id}: {e}")
 
-    # Notify admin about the purchase (for manifest_1on1 — Алёна вручную пишет)
-    if product_code == "manifest_1on1" and settings.tg_admin_id:
-        try:
-            await bot.send_message(
-                settings.tg_admin_id,
-                f"💬 Manifest 1:1 продан\nuser tg_id={tg_id}\nNeed to schedule call.",
-            )
-        except Exception:
-            pass
+    # Уведомляем админа о КАЖДОЙ продаже (видимость выручки) + ГРОМКО, если доступ
+    # не доставлен (юзер оплатил через web и ни разу не жал /start → бот не может писать первым).
+    if not sent:
+        await _notify_admin(bot,
+            f"🔴 Оплата «{product_code}» прошла, но бот НЕ смог написать юзеру tg_id={tg_id} "
+            "(скорее всего не жал /start). Доступ НЕ доставлен — напиши ему первым.\n\n"
+            f"Что должно было прийти:\n{text}")
+    else:
+        note = " · нужно назначить созвон" if product_code == "manifest_1on1" else ""
+        await _notify_admin(bot, f"✅ Продажа: «{product_code}» · tg_id={tg_id}{note}")
 
 
 async def portrait_route(request: web.Request) -> web.Response:
