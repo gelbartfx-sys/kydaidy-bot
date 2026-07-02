@@ -177,13 +177,28 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 "→ Выдай доступ вручную и скажи мне — доточу маппинг.")
             return web.Response(status=200, text="ok")  # 200 — чтобы Tribute не ретраил бесконечно
 
+        # A1 (аудит): идемпотентность — ретрай Tribute (таймаут/5xx) НЕ должен давать
+        # второй грант (2 invite-ссылки, 2 welcome). Дедуп по payment_id через bot_meta
+        # (покрывает и подписки: там payment_id = subscription_id). Метка ставится
+        # ПОСЛЕ успешного гранта — сбой до гранта корректно переиграется ретраем.
+        from database import get_meta, set_meta
+        _dedup_key = f"pay_{event}_{payment_id}" if payment_id else ""
+        if _dedup_key and await get_meta(_dedup_key):
+            logger.info("Tribute: дубль вебхука %s (payment_id=%s) — уже выдано, скип",
+                        event, payment_id)
+            return web.Response(status=200, text="ok")
+
         if event in _TRIBUTE_SUB_EVENTS:
             await add_subscription(tg_id, code)
             await _grant_access(request.app["bot"], tg_id, code)
+            if _dedup_key:
+                await set_meta(_dedup_key, "1")
             logger.info("Tribute: подписка %s выдана %s", code, tg_id)
         elif event in _TRIBUTE_DIGITAL_EVENTS:
             await add_purchase(tg_id, code, amount, payment_id)
             await _grant_access(request.app["bot"], tg_id, code)
+            if _dedup_key:
+                await set_meta(_dedup_key, "1")
             logger.info("Tribute: продукт %s выдан %s", code, tg_id)
         elif event in _TRIBUTE_CANCEL_EVENTS:
             logger.info("Tribute: отмена %s у %s (отзыв доступа — TODO)", code, tg_id)

@@ -32,7 +32,7 @@ from database import (
     get_user, get_active_subscription,
     ai_active_session, ai_total_sessions,
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
-    ai_close_session, ai_set_last_request, save_dossier,
+    ai_close_session, ai_close_all_active, ai_set_last_request, save_dossier,
     ai_stale_sessions, ai_mark_nudged, save_lead_signals, set_lead_track,
     get_client_model, save_client_model,
     log_event, followup_schedule, get_lead_signals, add_circle_credits,
@@ -364,9 +364,8 @@ async def _do_start(callback: CallbackQuery):
 
 @alena_router.callback_query(F.data == "alena:stop")
 async def cb_stop(callback: CallbackQuery):
-    sess = await ai_active_session(callback.from_user.id)
-    if sess:
-        await ai_close_session(sess["id"])
+    # A2: закрываем ВСЕ активные встречи (двойной тап мог наплодить сироту).
+    await ai_close_all_active(callback.from_user.id)
     await callback.message.answer(
         "Хорошо. Встреча закрыта.\n\nВозвращайся, когда будешь готова к новой теме — /alena.\n\n— Алёна",
         reply_markup=_menu_kbd(),
@@ -641,7 +640,7 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
     await ai_add_message(sid, user.id, "model", reply)
 
     if closed:
-        await ai_close_session(sid)
+        await ai_close_all_active(user.id)   # A2: все активные, не только текущая
         if request:
             await ai_set_last_request(user.id, request)
         await _send_alive(message, reply)

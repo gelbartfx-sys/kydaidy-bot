@@ -131,6 +131,11 @@ CREATE TABLE IF NOT EXISTS ai_messages (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS bot_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
 CREATE TABLE IF NOT EXISTS funnel_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tg_id INTEGER,
@@ -778,11 +783,24 @@ async def events_count_recent(tg_id: int, event: str, hours: int = 48) -> int:
 
 
 async def ai_open_session(tg_id: int):
-    """Создаёт активную встречу и возвращает её строку (с id)."""
+    """Создаёт активную встречу и возвращает её строку (с id).
+
+    A2 (аудит): открытие АТОМАРНОЕ — INSERT только если активной встречи нет
+    (двойной тап «Начать» раньше давал 2 активные сессии → обход лимита)."""
     await _exec(
-        "INSERT INTO ai_sessions (tg_id, status, turns) VALUES (?, 'active', 0)",
-        (tg_id,))
+        "INSERT INTO ai_sessions (tg_id, status, turns) "
+        "SELECT ?, 'active', 0 "
+        "WHERE NOT EXISTS (SELECT 1 FROM ai_sessions WHERE tg_id = ? AND status = 'active')",
+        (tg_id, tg_id))
     return await ai_active_session(tg_id)
+
+
+async def ai_close_all_active(tg_id: int):
+    """A2: закрыть ВСЕ активные встречи юзера (раньше закрывалась только новейшая —
+    осиротевшая старая жила вечно и давала безлимит модели)."""
+    await _exec(
+        "UPDATE ai_sessions SET status = 'closed', closed_at = CURRENT_TIMESTAMP "
+        "WHERE tg_id = ? AND status = 'active'", (tg_id,))
 
 
 async def ai_close_session(session_id: int):
