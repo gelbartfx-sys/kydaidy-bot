@@ -30,7 +30,10 @@ class Settings(BaseSettings):
     # Opus 4.8 + adaptive thinking на КОМПАКТНОМ входе. Проход-ОТВЕТ (голос
     # Алёны): Haiku 4.5. См. docs/hermes/ai-coach-architecture.md.
     brain_diagnose_model: str = "claude-opus-4-8"
-    brain_respond_model: str = "claude-haiku-4-5"
+    # Голос: Haiku дважды ловился на согласовании («ты не бываю», «остаться одна
+    # с этим») — мандат Кая «коуч должен быть грамотным» → Sonnet (сильнее в русской
+    # морфологии, ~$0.01/ход — приемлемо).
+    brain_respond_model: str = "claude-sonnet-5"
 
     # ── Голос Алёны в диалоге (Волна 1: H1/H3, присутствие) ───────────────────
     # Ключевые ходы встречи приходят ГОЛОСОВЫМИ: диагноз мозга решает medium=voice

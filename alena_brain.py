@@ -198,7 +198,8 @@ async def respond(directive: str, method_phase: str, name, archetype,
 async def brain_turn(history: list[dict], name, archetype,
                      client_model: dict | None,
                      profile: str | None = None,
-                     fresh: bool = False) -> tuple[str, dict, dict, str | None]:
+                     fresh: bool = False,
+                     force_voice: bool = False) -> tuple[str, dict, dict, str | None]:
     """Полный ход мозга v2: диагноз → ответ.
 
     → (reply Алёны, обновлённая модель клиентки, сигналы лида {heat,open,resist,value},
@@ -211,7 +212,10 @@ async def brain_turn(history: list[dict], name, archetype,
     # Канал хода решается ЗДЕСЬ (единая точка): голос — если диагноз попросил ИЛИ
     # фаза = истинный запрос/сдвиг (эмоц. пик по определению). Ответ тогда пишется
     # как устная речь, и _talk шлёт его голосовым (cm["medium"]).
-    voice_out = (dx.get("medium") == "voice"
+    # force_voice — человек сам говорил голосом: зеркалим канал ЖЕЛЕЗНО (Кай 02.07:
+    # на открытую боль пришёл длинный текст — доверять только решению диагноза нельзя).
+    voice_out = (force_voice
+                 or dx.get("medium") == "voice"
                  or dx.get("method_phase") in ("name_true_request", "give_shift"))
     reply = await respond(dx.get("directive"), dx.get("method_phase"),
                           name, archetype, history, voice_mode=voice_out,

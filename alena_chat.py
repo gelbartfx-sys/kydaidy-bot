@@ -420,8 +420,10 @@ async def on_alena_talk(message: Message):
     await _talk(message, message.text)
 
 
-async def _talk(message: Message, text: str):
-    """Один ход встречи (текст ИЛИ расшифрованный голос) → ответ Алёны."""
+async def _talk(message: Message, text: str, by_voice: bool = False):
+    """Один ход встречи (текст ИЛИ расшифрованный голос) → ответ Алёны.
+
+    by_voice=True — человек говорил голосом → Алёна отвечает голосом (зеркало канала)."""
     user = message.from_user
     sess = await ai_active_session(user.id)
     if not sess:
@@ -490,9 +492,13 @@ async def _talk(message: Message, text: str):
                 cm = await get_client_model(user.id)
                 # turns==1 → первый ход НОВОЙ сессии: прошлые встречи = память,
                 # метод-петля заново (фидбек Кая: не смешивать контексты сессий).
+                # Имя в речь — только кириллицей: латинский ник («Creater») в русской
+                # реплике ломает живость (фидбек Кая 02.07).
+                spoken_name = user.first_name if re.search(
+                    r"[а-яА-ЯёЁ]", user.first_name or "") else None
                 reply, new_cm, brain_signals, brain_track = await brain_turn(
-                    history, user.first_name, archetype, cm, profile,
-                    fresh=(turns <= 1))
+                    history, spoken_name, archetype, cm, profile,
+                    fresh=(turns <= 1), force_voice=by_voice)
                 await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
                 brain_phase = (new_cm or {}).get("method_phase")
                 brain_medium = (new_cm or {}).get("medium")
@@ -632,7 +638,7 @@ async def on_alena_voice(message: Message):
         return
     # Показываем расшифровку — человек видит, что я расслышала его слова.
     await message.answer(f"🎙️ {text}", parse_mode=None)
-    await _talk(message, text)
+    await _talk(message, text, by_voice=True)
 
 
 # ── Hermes #1: «затихшая» встреча → один мягкий оффер Клуба ────────────────────
@@ -713,7 +719,24 @@ async def _after_close(message: Message, user, request: str | None = None):
                 "\n\n— Алёна",
                 reply_markup=_bridge_kbd(), parse_mode=None)
             return
-        # Бесплатная встреча исчерпана → первая ступень = Клуб (низкий порог).
+        # Адаптивный порядок офферов (Кай 02.07): ГОРЯЧЕЙ (трек T4 — готова к шагу)
+        # первым предлагаем ФЛАГМАН 1:1, Клуб — рядом второй строкой. Остальным —
+        # Клуб (трипваер). Рынок: AI слабо закрывает высокий чек холодным, поэтому
+        # 1:1-первым только по скорингу готовности.
+        u_row = await get_user(user.id)
+        if (u_row or {}).get("lead_track") == "T4":
+            await log_event(user.id, "offer_shown", "flagship_1on1_T4")
+            await message.answer(
+                f"Твой настоящий запрос — вот он:\n\n«{q}»\n\n"
+                "Показать я показала. Но такое разматывают не в переписке. Ты готова — "
+                "я это вижу по нашему разговору. Поэтому скажу прямо: возьми этот запрос "
+                "на живую встречу со мной, 1:1 — час только про тебя, именно с этим.\n\n"
+                "Если хочешь мягче и постепенно — есть Клуб: я рядом каждый день, "
+                "безлимит наших встреч, эфиры, круг женщин с похожими историями.\n\n— Алёна",
+                reply_markup=_bridge_kbd(), parse_mode=None)
+            await _schedule_followups(user.id)
+            return
+        # Бесплатная встреча исчерпана → первая ступень = Клуб (трипваер, решение Кая).
         # Копирайт Hermes: H1 (не ждёт) + H3 (ты из первых) + H5 (якорь цены).
         # H3 (Волна 1): личную часть оффера Алёна ГОВОРИТ голосом — доверие в момент
         # решения. Голос ушёл → текстом остаётся короткое CTA + кнопка; сбой TTS →
