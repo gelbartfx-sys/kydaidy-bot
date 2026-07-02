@@ -177,12 +177,15 @@ async def diagnose(history: list[dict], name, archetype,
 
 
 async def respond(directive: str, method_phase: str, name, archetype,
-                  history: list[dict], voice_mode: bool = False) -> str:
+                  history: list[dict], voice_mode: bool = False,
+                  profile: str | None = None) -> str:
     """ПРОХОД 2 — ответ голосом Алёны (Haiku 4.5), исполняет директиву.
 
     voice_mode=True → ответ будет озвучен: промпт требует устную речь (коротко,
-    без письменных конструкций, без тавтологии)."""
-    system = build_response_prompt(name, archetype, directive, method_phase, voice_mode)
+    без письменных конструкций, без тавтологии).
+    profile — её анкета (смесь Теней + досье): Алёна опирается на неё ЯВНО."""
+    system = build_response_prompt(name, archetype, directive, method_phase,
+                                   voice_mode, profile)
     messages = _to_claude_messages(history)
     return await _call_claude(
         settings.brain_respond_model, system, messages,
@@ -207,7 +210,8 @@ async def brain_turn(history: list[dict], name, archetype,
     voice_out = (dx.get("medium") == "voice"
                  or dx.get("method_phase") in ("name_true_request", "give_shift"))
     reply = await respond(dx.get("directive"), dx.get("method_phase"),
-                          name, archetype, history, voice_mode=voice_out)
+                          name, archetype, history, voice_mode=voice_out,
+                          profile=profile)
 
     # Собираем модель клиентки для сохранения: обновление от диагноза + служебка.
     cm = dict(client_model) if isinstance(client_model, dict) else {}

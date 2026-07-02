@@ -15,15 +15,12 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
 )
 
-from urllib.parse import quote
-
 from config import settings
 from shadow_test import (
     ARCHETYPES, decode_distribution, winner_from_counts, encode_distribution,
 )
 from ai_quiz import generate_hero_image, generate_analysis_text
 from profile_image import render_profile
-import portrait_store
 
 # Публичные адреса для сборки ссылки на профиль.
 BOT_PUBLIC_URL = "https://kydaidy-bot.onrender.com"
@@ -457,21 +454,11 @@ async def on_photo(message: Message):
             pass
 
     await log_event(tg_id, "portrait_ok", code)
-    # Хостим портрет → ссылка на веб-профиль (HD-скачивание + шеринг).
-    token = portrait_store.put(portrait)
-    portrait_url = f"{BOT_PUBLIC_URL}/p/{token}"
-    profile_url = f"{SITE_URL}/profile?d={dist}&p={quote(portrait_url, safe='')}"
-    kbd = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌑 Открыть в HD / поделиться", url=profile_url)],
-    ])
-
-    # Один месседж: портрет + HD-кнопка в подписи. Без лишних сообщений/кнопок —
-    # сразу к живому контакту Алёны (подписку перенесли в конец разговора).
+    # Портрет БЕЗ кнопок (фидбек Кая 02.07: HD-кнопка уводила из потока перед
+    # сессией — ничего кликабельного между анкетой и встречей).
     await message.answer_photo(
         BufferedInputFile(profile_png, filename="arhetip-profil.png"),
-        caption=f"🌑 Твой архетипический профиль · ведущая Тень: {a['name']}\n\n"
-                "Сохрани или открой в HD — кнопка ниже.",
-        reply_markup=kbd,
+        caption=f"🌑 Твой архетипический профиль · ведущая Тень: {a['name']}",
     )
     # Видео-кружок про её Тень (вовлекающий момент перед хуком, если готов для архетипа).
     kruzhok_shown = await _send_shadow_kruzhok(message, code)
