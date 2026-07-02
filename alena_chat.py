@@ -207,11 +207,63 @@ async def open_shadow_session(target: Message, user, code: str,
     await log_event(user.id, "session_open", "auto")
     if await ai_total_sessions(user.id) <= 1:
         await target.answer(DISCLAIMER)
-    # Первый контакт — «вживую»: печатает → приходит пузырями (эффект присутствия).
-    # Если видео-кружок уже показал Тень — текстовый хук короткий, без дубля.
+    # W2: рамку «пробная сессия» Алёна ГОВОРИТ голосом (канал задан с первой
+    # секунды); вопрос — текстом перед глазами + W1: кнопки первого шага (барьер
+    # чистого листа — главная утечка контакта). Сбой TTS → прежний текст-опенер.
     opener = _shadow_opener_short(code) if video_hook else _shadow_opener(code)
-    await _send_alive(target, opener, _pause_kbd())
+    q = _SHADOW_HOOK_Q.get(code, "Что у тебя сейчас болит на самом деле?")
+    name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
+    hello = ((f"{name}, привет. Это я, Алёна. " if name else "Привет. Это я, Алёна. ") +
+             "Дальше у нас с тобой настоящая пробная сессия — одна, бесплатная. "
+             "По твоей анкете мы найдём, что тобой правда руководит — твой настоящий "
+             "запрос, а не тот, что сверху. Отвечай честно, как есть — текстом или "
+             "голосовым. Если я замолчала на минуту — я не исчезла, я думаю о тебе. " + q)
+    if await send_voice_reply(target, hello):
+        await log_event(user.id, "voice_reply", "opener")
+        await target.answer(
+            f"Мой вопрос — перед глазами:\n\n«{q}»\n\n"
+            "Ответь, как есть — или начни с подсказки:",
+            parse_mode=None, reply_markup=_first_step_kbd())
+    else:
+        await _send_alive(target, opener, _first_step_kbd())
     return True
+
+
+# W1: кнопки первого шага — тап = первый ответ сделан, дальше говорит сама.
+_FIRST_STEPS = {
+    "f1": "Это про отношения. Про то, что с ними у меня не складывается.",
+    "f2": "Это про пустоту внутри. Всё вроде нормально, а внутри пусто.",
+    "f3": "Это про то, что я всех отталкиваю. Или не подпускаю.",
+}
+
+
+def _first_step_kbd() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="про отношения", callback_data="alena:f1")],
+        [InlineKeyboardButton(text="про пустоту внутри", callback_data="alena:f2")],
+        [InlineKeyboardButton(text="про то, что я всех отталкиваю", callback_data="alena:f3")],
+        [InlineKeyboardButton(text="скажу сама…", callback_data="alena:f0")],
+    ])
+
+
+@alena_router.callback_query(F.data.startswith("alena:f"))
+async def cb_first_step(callback: CallbackQuery):
+    """W1: выбор подсказки = первая реплика клиентки → обычный ход встречи."""
+    key = callback.data.split(":")[1]
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if key == "f0":
+        await callback.message.answer("Я слушаю. Скажи, как есть — текстом или голосовым 🎙",
+                                      parse_mode=None)
+        return
+    text = _FIRST_STEPS.get(key)
+    if not text:
+        return
+    await callback.message.answer(f"— {text}", parse_mode=None)
+    await _talk(callback.message, text, user_override=callback.from_user)
 
 
 # ── Вход ──────────────────────────────────────────────────────────────────────
@@ -422,11 +474,14 @@ async def on_alena_talk(message: Message):
     await _talk(message, message.text)
 
 
-async def _talk(message: Message, text: str, by_voice: bool = False):
+async def _talk(message: Message, text: str, by_voice: bool = False,
+                user_override=None):
     """Один ход встречи (текст ИЛИ расшифрованный голос) → ответ Алёны.
 
-    by_voice=True — человек говорил голосом → Алёна отвечает голосом (зеркало канала)."""
-    user = message.from_user
+    by_voice=True — человек говорил голосом → Алёна отвечает голосом.
+    user_override — реальный юзер, когда ход пришёл callback-кнопкой (W1): у
+    callback.message from_user = бот, брать его нельзя."""
+    user = user_override or message.from_user
     sess = await ai_active_session(user.id)
     if not sess:
         return
@@ -576,8 +631,10 @@ async def _talk(message: Message, text: str, by_voice: bool = False):
     else:
         # H1: канал хода решён в brain_turn (диагноз ИЛИ ключевая фаза → voice, и
         # текст уже написан как устная речь). Сбой TTS → тот же текст, ход не теряется.
+        sent_voice = False
         if brain_medium == "voice":
             if await send_voice_reply(message, reply, _pause_kbd()):
+                sent_voice = True
                 await log_event(user.id, "voice_reply", brain_phase)
                 # Ведение (фидбек Кая 02.07): после голосового — вопрос текстом перед
                 # глазами + что сделать. Голосовое прослушал и забыл, текст остаётся.
@@ -585,8 +642,26 @@ async def _talk(message: Message, text: str, by_voice: bool = False):
                 tail = (f"Мой вопрос: «{q}»\n\nОтветь текстом или голосовым 🎙" if q
                         else "Ответь, как есть — текстом или голосовым 🎙")
                 await message.answer(tail, parse_mode=None)
-                return
-        await _send_alive(message, reply, _pause_kbd())
+        if not sent_voice:
+            await _send_alive(message, reply, _pause_kbd())
+        # W7: чекпойнт пути на 5-м ходу — ощущение «меня ведут» (карта прогресса
+        # из модели клиентки). Только в brain-пути и если есть чем наполнить.
+        if turns == 5 and settings.brain_v2_enabled:
+            try:
+                cm_now = await get_client_model(user.id) or {}
+                came = (cm_now.get("facade_lie") or "").strip()
+                seen = (cm_now.get("true_request_hypothesis") or "").strip()
+                if came or seen:
+                    parts = ["🗺 Где мы уже, смотри:"]
+                    if came:
+                        parts.append(f"— ты пришла с «{came[:120]}»")
+                    if seen:
+                        parts.append(f"— а под этим уже проступает настоящее: «{seen[:120]}»")
+                    parts.append("Осталось главное. Идём.")
+                    await message.answer("\n".join(parts), parse_mode=None)
+                    await log_event(user.id, "checkpoint_shown")
+            except Exception:
+                logger.warning("checkpoint failed (continuing)", exc_info=True)
 
 
 # ── Голосовой ввод: человек отвечает голосом → распознаём → тот же ход ────────
