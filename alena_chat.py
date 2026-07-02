@@ -84,10 +84,11 @@ def _start_kbd() -> InlineKeyboardMarkup:
 
 
 def _pause_kbd() -> InlineKeyboardMarkup:
-    # Клуб-CTA доступен ПРЯМО во время встречи — оффер не «теряется», если она
-    # замолчит на пике (Hermes #1). Внизу — тихая кнопка завершить.
+    # Во время встречи — НИКАКИХ продающих кнопок (фидбек Кая 02.07: кнопка Клуба
+    # под каждой репликой ломает доверие; продаём, когда довели до готовности).
+    # Оффер живёт в своих моментах: закрытие (_after_close), затихшая встреча
+    # (stale nudge с кнопкой), дожимы. Здесь — только тихое «завершить».
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✦ Войти в Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
         [InlineKeyboardButton(text="⏸ завершить встречу", callback_data="alena:stop")],
     ])
 
@@ -526,9 +527,11 @@ async def _talk(message: Message, text: str):
         await _send_alive(message, reply)
         await _after_close(message, user, request)
     else:
-        # H1: диагноз попросил голос (эмоц. пик/сдвиг) → реплика приходит ГОЛОСОВЫМ
-        # Алёны (кнопки те же). Любой сбой TTS → тот же текст, ход не теряется.
-        if brain_medium == "voice":
+        # H1: диагноз попросил голос → реплика приходит ГОЛОСОВЫМ Алёны (кнопки те же).
+        # Пояс-и-подтяжки (фидбек Кая 02.07 «приходит текст»): на ключевых фазах метода
+        # (истинный запрос / сдвиг) голос форсируем независимо от решения диагноза —
+        # это эмоц. пик по определению. Любой сбой TTS → тот же текст, ход не теряется.
+        if brain_medium == "voice" or brain_phase in ("name_true_request", "give_shift"):
             if await send_voice_reply(message, reply, _pause_kbd()):
                 await log_event(user.id, "voice_reply", brain_phase)
                 return
@@ -621,8 +624,10 @@ async def run_stale_session_tick(bot):
         # нудж на следующем тике — задвоенный outreach хуже одного пропуска.
         await ai_mark_nudged(sid)
         try:
+            # Нудж — единственное место, где кнопка Клуба ВО ВРЕМЯ встречи уместна:
+            # текст сам делает оффер (из _pause_kbd кнопку убрали, фидбек Кая 02.07).
             await bot.send_message(tg_id, _STALE_NUDGE_TEXT,
-                                   reply_markup=_pause_kbd(), parse_mode=None)
+                                   reply_markup=_club_only_kbd(), parse_mode=None)
             await log_event(tg_id, "stale_nudge")
             sent += 1
         except Exception:

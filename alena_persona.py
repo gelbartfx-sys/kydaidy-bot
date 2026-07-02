@@ -396,7 +396,7 @@ def build_diagnose_prompt(name: str | None, archetype: dict | None,
   "score": {{"ж": 0, "о": 0, "с": 0, "ц": 0}},
   "method_phase": "{METHOD_PHASES[0]}|{METHOD_PHASES[1]}|{METHOD_PHASES[2]}|{METHOD_PHASES[3]}|{METHOD_PHASES[4]}|{METHOD_PHASES[5]}",
   "directive": "короткая инструкция голосу Алёны: что сделать этим ходом",
-  "medium": "text|voice — голос на эмоц. пике/сдвиге, иначе текст",
+  "medium": "text|voice — voice ВСЕГДА когда: она открыла боль/уязвимость/признание, ты ловишь противоречие, даёшь отражение или сдвиг. text — только для нейтральных уточнений первых ходов. Голос = присутствие, выбирай его смело",
   "track": "T1|T2|T3|T4"
 }}
 
