@@ -654,6 +654,9 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
             if await send_voice_reply(message, reply, _pause_kbd()):
                 sent_voice = True
                 await log_event(user.id, "voice_reply", brain_phase)
+            else:
+                # Телеметрия отказа голоса: видно В ЧЁМ дело (длина/TTS), а не гадаем.
+                await log_event(user.id, "voice_fallback_text", f"len={len(reply)}")
                 # Ведение: вопрос текстом перед глазами. НЕ как робот (мандат Кая):
                 # формулировки ротируются, инструкция «как отвечать» — только в первых
                 # двух ходах (дальше она уже знает), без вопроса — тишина, не шаблон.
