@@ -141,14 +141,17 @@ async def _call_claude(model: str, system: str, messages: list[dict], *,
 
 
 async def diagnose(history: list[dict], name, archetype,
-                   client_model: dict | None, profile: str | None = None) -> dict:
+                   client_model: dict | None, profile: str | None = None,
+                   fresh: bool = False) -> dict:
     """ПРОХОД 1 — диагноз (Opus 4.8, adaptive thinking). → dict модели/директивы.
 
     profile — индивидуальная карта из теста (полное распределение Теней + досье):
     комбинации у всех разные, диагноз работает от её конкретной смеси.
+    fresh=True — первый ход НОВОЙ сессии: модель клиентки трактуется как память
+    прошлых встреч, метод-петля стартует заново (не смешиваем контексты сессий).
     Крэш-сейф: любой сбой (сеть/ключ/парс/пустой ответ) → безопасный дефолт."""
     try:
-        system = build_diagnose_prompt(name, archetype, client_model, profile)
+        system = build_diagnose_prompt(name, archetype, client_model, profile, fresh)
         messages = _to_claude_messages((history or [])[-DIAGNOSE_HISTORY:])
         raw = await _call_claude(
             settings.brain_diagnose_model, system, messages,
@@ -194,7 +197,8 @@ async def respond(directive: str, method_phase: str, name, archetype,
 
 async def brain_turn(history: list[dict], name, archetype,
                      client_model: dict | None,
-                     profile: str | None = None) -> tuple[str, dict, dict, str | None]:
+                     profile: str | None = None,
+                     fresh: bool = False) -> tuple[str, dict, dict, str | None]:
     """Полный ход мозга v2: диагноз → ответ.
 
     → (reply Алёны, обновлённая модель клиентки, сигналы лида {heat,open,resist,value},
@@ -203,7 +207,7 @@ async def brain_turn(history: list[dict], name, archetype,
     записал lead-сигналы и трек (без этого закрытие на Клуб шло без топлива, а /sources
     был слеп к 🔥). diagnose() крэш-сейф внутри. respond() может бросить — тогда бросаем
     наверх, вызывающий (_talk) фолбэчит на v1-путь в том же ходе."""
-    dx = await diagnose(history, name, archetype, client_model, profile)
+    dx = await diagnose(history, name, archetype, client_model, profile, fresh)
     # Канал хода решается ЗДЕСЬ (единая точка): голос — если диагноз попросил ИЛИ
     # фаза = истинный запрос/сдвиг (эмоц. пик по определению). Ответ тогда пишется
     # как устная речь, и _talk шлёт его голосовым (cm["medium"]).

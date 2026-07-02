@@ -488,8 +488,11 @@ async def _talk(message: Message, text: str):
         if settings.brain_v2_enabled:
             try:
                 cm = await get_client_model(user.id)
+                # turns==1 → первый ход НОВОЙ сессии: прошлые встречи = память,
+                # метод-петля заново (фидбек Кая: не смешивать контексты сессий).
                 reply, new_cm, brain_signals, brain_track = await brain_turn(
-                    history, user.first_name, archetype, cm, profile)
+                    history, user.first_name, archetype, cm, profile,
+                    fresh=(turns <= 1))
                 await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
                 brain_phase = (new_cm or {}).get("method_phase")
                 brain_medium = (new_cm or {}).get("medium")
