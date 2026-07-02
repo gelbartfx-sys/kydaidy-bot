@@ -213,19 +213,37 @@ async def open_shadow_session(target: Message, user, code: str,
     opener = _shadow_opener_short(code) if video_hook else _shadow_opener(code)
     q = _SHADOW_HOOK_Q.get(code, "Что у тебя сейчас болит на самом деле?")
     name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
-    hello = ((f"{name}, привет. Это я, Алёна. " if name else "Привет. Это я, Алёна. ") +
-             "Дальше у нас с тобой настоящая пробная сессия — одна, бесплатная. "
-             "По твоей анкете мы найдём, что тобой правда руководит — твой настоящий "
-             "запрос, а не тот, что сверху. Отвечай честно, как есть — текстом или "
-             "голосовым. Если я замолчала на минуту — я не исчезла, я думаю о тебе. " + q)
+    who = f"{name}, это" if name else "Это"
+    if video_hook:
+        # Кружок УЖЕ поздоровался и задал вопрос — голосовое продолжает его, а не
+        # здоровается заново (фидбек Кая 02.07: «тупо звучит, состыковать логично»).
+        hello = (f"{who} была я — в кружке. И вопрос я тебе уже задала — он сейчас "
+                 "будет ниже, перед глазами. Дальше у нас настоящая пробная сессия: "
+                 "одна, бесплатная. Отвечай честно, как есть — текстом или голосовым. "
+                 "Если я замолчала на минуту — я не исчезла, я думаю о тебе.")
+    else:
+        hello = ((f"{name}, привет. Это я, Алёна. " if name else "Привет. Это я, Алёна. ") +
+                 "Дальше у нас с тобой настоящая пробная сессия — одна, бесплатная. "
+                 "По твоей анкете мы найдём твой настоящий запрос — не тот, что сверху. "
+                 "Отвечай честно, как есть — текстом или голосовым. Если я замолчала "
+                 "на минуту — я думаю о тебе. Вот мой вопрос. " + q)
     if await send_voice_reply(target, hello):
         await log_event(user.id, "voice_reply", "opener")
+    else:
+        await _send_alive(target, opener)
+    # Вопрос + кнопки первого шага — ВСЕГДА отдельным сообщением (и при живом
+    # голосе, и при текст-фолбэке), с собственной страховкой: сбой клавиатуры не
+    # должен оставить человека без вопроса (фидбек Кая: «кнопки не появлялись»).
+    try:
         await target.answer(
             f"Мой вопрос — перед глазами:\n\n«{q}»\n\n"
             "Ответь, как есть — или начни с подсказки:",
             parse_mode=None, reply_markup=_first_step_kbd())
-    else:
-        await _send_alive(target, opener, _first_step_kbd())
+        await log_event(user.id, "first_step_kbd")
+    except Exception:
+        logger.warning("first-step kbd failed (plain fallback)", exc_info=True)
+        await target.answer(f"Мой вопрос — перед глазами:\n\n«{q}»\n\n"
+                            "Ответь, как есть — текстом или голосовым.", parse_mode=None)
     return True
 
 
@@ -940,13 +958,17 @@ async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
 
 
 async def _after_close(message: Message, user, request: str | None = None):
-    rem = await _remaining(user)
+    # Сегментация оффера — ТОЛЬКО по реальному членству в Клубе (фикс 02.07:
+    # whitelist-тестеры раньше улетали в VIP-ветку и не видели боевой путь —
+    # кружок-оффер/дожимы; теперь тестовый аккаунт проходит как обычная клиентка,
+    # безлимит встреч у него остаётся).
+    is_member = await _is_club_member(user.id)
 
     # Вскрылся настоящий запрос → ведём дальше. Куда именно — по сегменту:
     if request:
         q = request.strip().rstrip(".")
-        if rem is None:
-            # Член Клуба / whitelist → тёплый докрут в 1:1 (я тебя уже знаю).
+        if is_member:
+            # Член Клуба → тёплый докрут в 1:1 (я тебя уже знаю).
             await log_event(user.id, "offer_shown", "bridge_1on1")
             await message.answer(
                 f"Твой настоящий запрос — вот он:\n\n«{q}»\n\n"
@@ -991,7 +1013,7 @@ async def _after_close(message: Message, user, request: str | None = None):
         return
 
     # Запроса не вскрылось / ей хватило — честно, без втюхивания.
-    if rem is None:
+    if is_member:
         await message.answer(
             "На сегодня всё. Ещё разговор — просто /alena.", reply_markup=_menu_kbd())
         return
