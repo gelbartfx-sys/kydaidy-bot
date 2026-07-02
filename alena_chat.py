@@ -35,9 +35,11 @@ from database import (
     ai_close_session, ai_set_last_request, save_dossier,
     ai_stale_sessions, ai_mark_nudged, save_lead_signals, set_lead_track,
     get_client_model, save_client_model,
-    log_event, followup_schedule,
+    log_event, followup_schedule, get_lead_signals, add_circle_credits,
+    ai_last_session, events_count_recent,
 )
-from alena_voice import send_voice_reply
+from alena_voice import send_voice_reply, send_kruzhok_to
+from lead_policy import should_spend_circle, CIRCLE_CREDITS
 from alena_persona import (
     build_system, DISCLAIMER, INTRO, CLOSE_MARK, is_crisis, CRISIS_REPLY,
     extract_request, extract_dossier, extract_score, strip_dangling_markers,
@@ -641,6 +643,127 @@ async def on_alena_voice(message: Message):
     await _talk(message, text, by_voice=True)
 
 
+# ── Кружок ОТ человека: распознаём видео-кружок как реплику (Кай 02.07) ────────
+class _InAlenaVideoFilter(BaseFilter):
+    async def __call__(self, message: Message) -> bool:
+        try:
+            return message.video_note is not None and \
+                await ai_active_session(message.from_user.id) is not None
+        except Exception:
+            return False
+
+
+async def _transcribe_video_note(bot, video_note) -> str:
+    """Видео-кружок Telegram (mp4) → текст через Gemini (мультимодальный вход)."""
+    buf = io.BytesIO()
+    await bot.download(video_note, destination=buf)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    payload = {
+        "contents": [{"parts": [
+            {"inline_data": {"mime_type": "video/mp4", "data": b64}},
+            {"text": "Расшифруй русскую речь из этого видео в текст дословно. "
+                     "Верни ТОЛЬКО расшифровку, без кавычек и комментариев."},
+        ]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 1024,
+                             "thinkingConfig": {"thinkingBudget": 0}},
+    }
+    url = f"{BASE}/models/{TEXT_MODEL}:generateContent?key={settings.gemini_key}"
+    async with aiohttp.ClientSession() as s:
+        async with s.post(url, json=payload,
+                          timeout=aiohttp.ClientTimeout(total=120)) as r:
+            body = await r.json()
+    parts = body.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    return "".join(p.get("text", "") for p in parts).strip()
+
+
+@alena_router.message(_InAlenaVideoFilter())
+async def on_alena_video_note(message: Message):
+    """Человек ответил КРУЖКОМ → распознаём и ведём как обычный ход (голосом в ответ)."""
+    if not settings.gemini_key:
+        await message.answer("Кружок сейчас не распознаю — скажи голосовым или текстом.",
+                             parse_mode=None)
+        return
+    try:
+        text = await _transcribe_video_note(message.bot, message.video_note)
+    except Exception:
+        logger.exception("video note transcribe failed for %s", message.from_user.id)
+        text = ""
+    if not text:
+        await message.answer("Не расслышала кружок — скажи ещё раз или напиши.",
+                             parse_mode=None)
+        return
+    await message.answer(f"🎥 {text}", parse_mode=None)
+    await _talk(message, text, by_voice=True)
+
+
+# ── После оффера: сомнения/возражения НЕ теряем — дожимаем (Кай 02.07) ─────────
+class _AfterOfferFilter(BaseFilter):
+    """Пишет ПОСЛЕ закрытой встречи (оффер показан, не купила, <48ч) → возражение."""
+    async def __call__(self, message: Message) -> bool:
+        if not message.text or message.text.startswith("/"):
+            return False
+        try:
+            u = message.from_user
+            if await ai_active_session(u.id):
+                return False           # живую встречу ведёт основной хендлер
+            last = await ai_last_session(u.id)
+            if not last or last.get("status") != "closed":
+                return False
+            uu = await get_user(u.id)
+            if not (uu or {}).get("last_ai_request"):
+                return False           # оффера не было — не наш случай
+            if await get_active_subscription(u.id, "manifest_club"):
+                return False           # уже в Клубе
+            if await events_count_recent(u.id, "objection", 48) >= 3:
+                return False           # 3 отработки — дальше не давим
+            return True
+        except Exception:
+            return False
+
+
+@alena_router.message(F.text, _AfterOfferFilter())
+async def on_after_offer(message: Message):
+    """Отработка сомнения после оффера: признать → назвать страх → вернуть к двери."""
+    user = message.from_user
+    await log_event(user.id, "objection")
+    u = await get_user(user.id)
+    request = (u or {}).get("last_ai_request") or ""
+    last = await ai_last_session(user.id)
+    history = await ai_get_messages((last or {}).get("id"), HISTORY_LIMIT) or []
+    history = history + [{"role": "user", "content": message.text}]
+    archetype = None
+    shadow = (u or {}).get("shadow_dist")
+    if shadow:
+        counts = decode_distribution(shadow)
+        if counts:
+            archetype = ARCHETYPES[winner_from_counts(counts)]
+    _stop = asyncio.Event()
+    _typer = asyncio.create_task(_keep_typing(message, _stop))
+    try:
+        from alena_brain import respond
+        name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
+        reply = await respond(
+            f"Она сомневается/возражает после приглашения в Клуб (её настоящий запрос: "
+            f"«{request}»). Отработай по-человечески: признай сомнение, не дави и не "
+            "оправдывайся; назови страх, который за возражением; напомни, ЧТО именно "
+            "она получит под свой запрос; мягко верни к двери. Без цены и ссылок.",
+            "native_offer", name, archetype, history, voice_mode=True)
+        reply, _ = extract_request(reply)
+        reply = strip_dangling_markers(reply.replace(CLOSE_MARK, "")).strip()
+    except Exception:
+        logger.warning("objection respond failed", exc_info=True)
+        reply = ("Слышу тебя. Сомневаться — нормально: это про твою осторожность, "
+                 "не про слабость. Дверь открыта, когда решишь.")
+    finally:
+        _stop.set()
+        try:
+            await _typer
+        except Exception:
+            pass
+    if not await send_voice_reply(message, reply, _club_only_kbd()):
+        await message.answer(reply, parse_mode=None, reply_markup=_club_only_kbd())
+
+
 # ── Hermes #1: «затихшая» встреча → один мягкий оффер Клуба ────────────────────
 # Человек начал встречу, Алёна задала вопрос/сделала оффер — и он замолчал на
 # пике. Оффер не должен теряться в тишине: через N минут молчания шлём ОДИН
@@ -701,6 +824,46 @@ async def _schedule_followups(tg_id: int):
         await followup_schedule(tg_id, _followup_delays())
 
 
+_OFFER_FALLBACK_TEXT = (
+    "В Клубе «Манифест» я рядом без лимита — продолжим ровно с этого места: наши "
+    "встречи, эфир каждую неделю, круг женщин, где не нужно держать лицо.\n\n"
+    "990 в месяц — чтобы не разбираться с этим одной. Дверь ниже.\n\n— Алёна")
+
+
+async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
+                         name: str | None, request: str):
+    """Ф2 (мандат Кая 02.07): САМ ОФФЕР Клуба = именной видео-кружок Алёны.
+
+    Рендер твина ~2–4 мин → идёт фоном после тизера «записываю тебе кружок».
+    Кнопка оплаты приходит ВМЕСТЕ с кружком. Сбой рендера → страховка: оффер
+    текстом с кнопкой — продажа не теряется никогда."""
+    q = request.strip().rstrip(".")[:140]
+    try:
+        who = f"{name}, послушай" if name else "Послушай"
+        script = (f"{who}. То, что у тебя сегодня открылось — «{q}» — это "
+                  "по-настоящему. И такое не разматывают в одиночку и не бросают на "
+                  "полпути. Я собрала Клуб именно для этого: там я рядом без лимита, "
+                  "каждую неделю живой эфир, и круг женщин, где не нужно держать "
+                  "лицо. Продолжим ровно с того места, где мы остановились. "
+                  "Дверь — под этим кружком. Я тебя жду.")
+        await add_circle_credits(tg_id, CIRCLE_CREDITS)  # леджер ДО рендера (антидубль)
+        if await send_kruzhok_to(bot, chat_id, script):
+            await log_event(tg_id, "offer_kruzhok", "sent")
+            await bot.send_message(
+                chat_id, "Это тебе. Лично.\n\nВойти — здесь:",
+                reply_markup=_club_only_kbd(), parse_mode=None)
+            return
+    except Exception:
+        logger.warning("offer kruzhok failed (fallback text)", exc_info=True)
+    # Страховка: кружок не собрался → оффер текстом, кнопка обязана дойти.
+    try:
+        await log_event(tg_id, "offer_kruzhok", "fallback_text")
+        await bot.send_message(chat_id, _OFFER_FALLBACK_TEXT,
+                               reply_markup=_club_only_kbd(), parse_mode=None)
+    except Exception:
+        logger.warning("offer fallback send failed", exc_info=True)
+
+
 async def _after_close(message: Message, user, request: str | None = None):
     rem = await _remaining(user)
 
@@ -736,38 +899,19 @@ async def _after_close(message: Message, user, request: str | None = None):
                 reply_markup=_bridge_kbd(), parse_mode=None)
             await _schedule_followups(user.id)
             return
-        # Бесплатная встреча исчерпана → первая ступень = Клуб (трипваер, решение Кая).
-        # Копирайт Hermes: H1 (не ждёт) + H3 (ты из первых) + H5 (якорь цены).
-        # H3 (Волна 1): личную часть оффера Алёна ГОВОРИТ голосом — доверие в момент
-        # решения. Голос ушёл → текстом остаётся короткое CTA + кнопка; сбой TTS →
-        # прежний полный текст, ничего не деградирует.
+        # Бесплатная встреча исчерпана → оффер Клуба = ИМЕННОЙ КРУЖОК (мандат Кая:
+        # «кружочки в начале и в конце, остальное голосом»). Схема: тизер голосом
+        # («записываю тебе кружок») → фоновый рендер твина ~2–4 мин → кружок с именем
+        # и её запросом + кнопка. Сбой рендера → страховка текстом с кнопкой.
         await log_event(user.id, "offer_shown", "club_request")
-        voiced = await send_voice_reply(
-            message,
-            f"Твой настоящий запрос — вот он: «{q}». Показать я показала. Но увидеть — "
-            "не значит прожить. И оно не ждёт: каждую неделю, что ты в это не смотришь, "
-            "оно тихо выбирает за тебя. Я рядом, пока ты это разматываешь — "
-            "если решишь не оставаться с этим одна.")
-        if voiced:
-            await log_event(user.id, "voice_reply", "offer")
-            await message.answer(
-                "В Клубе «Манифест» я рядом без лимита — в чате и на эфирах каждую "
-                "неделю. Клуб только открылся: ты заходишь одной из первых.\n\n"
-                "990 в месяц — меньше, чем кофе раз в неделю, чтобы не быть с этим "
-                "одной. А если захочешь сразу вглубь и лично — напиши, есть встреча "
-                "1:1.\n\n— Алёна",
-                reply_markup=_club_only_kbd(), parse_mode=None)
-        else:
-            await message.answer(
-                f"Твой настоящий запрос — вот он:\n\n«{q}»\n\n"
-                "Показать я показала. Но увидеть — не значит прожить. И оно не ждёт: каждую "
-                "неделю, что ты в это не смотришь, оно тихо выбирает за тебя.\n\n"
-                "В Клубе «Манифест» я рядом, пока ты это разматываешь — без лимита, в чате и "
-                "на эфирах каждую неделю. Клуб только открылся: ты заходишь одной из первых — "
-                "это твой круг с самого начала.\n\n"
-                "990 в месяц — меньше, чем кофе раз в неделю, чтобы не быть с этим одной. "
-                "А если захочешь сразу вглубь и лично — напиши, есть встреча 1:1.\n\n— Алёна",
-                reply_markup=_club_only_kbd(), parse_mode=None)
+        teaser = (f"Твой настоящий запрос — вот он: «{q}». Показать я показала. "
+                  "Но главное я скажу тебе не текстом. Подожди пару минут — "
+                  "записываю тебе кружок. Лично тебе.")
+        if not await send_voice_reply(message, teaser):
+            await message.answer(teaser, parse_mode=None)
+        _name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
+        asyncio.create_task(_offer_kruzhok(
+            message.bot, message.chat.id, user.id, _name, q))
         await _schedule_followups(user.id)
         return
 

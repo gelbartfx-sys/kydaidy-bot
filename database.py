@@ -758,6 +758,25 @@ async def ai_total_sessions(tg_id: int) -> int:
     return int((row or {}).get("n") or 0)
 
 
+async def ai_last_session(tg_id: int):
+    """Последняя встреча юзера любого статуса (для пост-оффер режима возражений)."""
+    return await _exec(
+        "SELECT * FROM ai_sessions WHERE tg_id = ? ORDER BY id DESC LIMIT 1",
+        (tg_id,), fetch="one")
+
+
+async def events_count_recent(tg_id: int, event: str, hours: int = 48) -> int:
+    """Сколько событий event у юзера за последние N часов (лимиты повторов). Крэш-сейф."""
+    try:
+        row = await _exec(
+            "SELECT COUNT(*) AS n FROM funnel_events WHERE tg_id = ? AND event = ? "
+            f"AND datetime(created_at) > datetime('now', '-{int(hours)} hours')",
+            (tg_id, event), fetch="one")
+        return int((row or {}).get("n") or 0)
+    except Exception:
+        return 0
+
+
 async def ai_open_session(tg_id: int):
     """Создаёт активную встречу и возвращает её строку (с id)."""
     await _exec(

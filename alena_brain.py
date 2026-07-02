@@ -212,11 +212,11 @@ async def brain_turn(history: list[dict], name, archetype,
     # Канал хода решается ЗДЕСЬ (единая точка): голос — если диагноз попросил ИЛИ
     # фаза = истинный запрос/сдвиг (эмоц. пик по определению). Ответ тогда пишется
     # как устная речь, и _talk шлёт его голосовым (cm["medium"]).
-    # force_voice — человек сам говорил голосом: зеркалим канал ЖЕЛЕЗНО (Кай 02.07:
-    # на открытую боль пришёл длинный текст — доверять только решению диагноза нельзя).
-    voice_out = (force_voice
-                 or dx.get("medium") == "voice"
-                 or dx.get("method_phase") in ("name_true_request", "give_shift"))
+    # Кай 02.07 (финальное): ГОЛОС — КАНАЛ ПО УМОЛЧАНИЮ («куча текста — клиент
+    # готов сорваться, читать лень»). Каждый содержательный ход пишется как устная
+    # речь и уходит голосовым; текст — только фолбэк при сбое TTS (в _talk).
+    voice_out = True
+    _ = force_voice  # сохранён в сигнатуре: зеркало канала теперь покрыто дефолтом
     reply = await respond(dx.get("directive"), dx.get("method_phase"),
                           name, archetype, history, voice_mode=voice_out,
                           profile=profile)

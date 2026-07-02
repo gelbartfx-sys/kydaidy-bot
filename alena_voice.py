@@ -13,6 +13,7 @@ TTS = HeyGen `POST /v3/voices/speech` (голос Digital Twin Алёны):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import aiohttp
@@ -59,6 +60,69 @@ async def tts_bytes(text: str) -> bytes | None:
     except Exception:
         logger.warning("heygen tts failed (fallback to text)", exc_info=True)
         return None
+
+
+# ── Именной видео-кружок Алёны (Ф2): рендер твина по тексту → video_note ──────
+_GEN_URL = "https://api.heygen.com/v2/video/generate"
+_STATUS_URL = "https://api.heygen.com/v1/video_status.get"
+ALENA_AVATAR_ID = "2ab45471e71149b2b07718d17a40fc9b"   # Digital Twin A «Алёна»
+
+
+async def render_kruzhok(text: str, timeout_min: int = 7) -> bytes | None:
+    """Текст → видео твина Алёны (квадрат 720, под video_note). None при сбое.
+
+    Рендер HeyGen ~2–4 мин — вызывать ТОЛЬКО из фоновой задачи, не в такте диалога.
+    """
+    if not settings.heygen_api_key or not (text or "").strip():
+        return None
+    headers = {"X-Api-Key": settings.heygen_api_key}
+    payload = {
+        "video_inputs": [{
+            "character": {"type": "avatar", "avatar_id": ALENA_AVATAR_ID},
+            "voice": {"type": "text", "input_text": text.strip(),
+                      "voice_id": settings.alena_voice_id},
+        }],
+        "dimension": {"width": 720, "height": 720},
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(_GEN_URL, json=payload, headers=headers,
+                              timeout=aiohttp.ClientTimeout(total=30)) as r:
+                body = await r.json()
+            vid = ((body or {}).get("data") or {}).get("video_id")
+            if not vid:
+                logger.warning("kruzhok generate: нет video_id: %s", str(body)[:200])
+                return None
+            for _ in range(timeout_min * 4):          # поллинг каждые ~15с
+                await asyncio.sleep(15)
+                async with s.get(f"{_STATUS_URL}?video_id={vid}", headers=headers,
+                                 timeout=aiohttp.ClientTimeout(total=30)) as r2:
+                    st = ((await r2.json()).get("data") or {})
+                if st.get("status") == "completed" and st.get("video_url"):
+                    async with s.get(st["video_url"],
+                                     timeout=aiohttp.ClientTimeout(total=120)) as r3:
+                        return await r3.read()
+                if st.get("status") == "failed":
+                    logger.warning("kruzhok render failed: %s", str(st)[:200])
+                    return None
+        return None
+    except Exception:
+        logger.warning("kruzhok render error", exc_info=True)
+        return None
+
+
+async def send_kruzhok_to(bot, chat_id: int, text: str) -> bool:
+    """Отрендерить и отправить именной кружок. True — ушёл."""
+    data = await render_kruzhok(text)
+    if not data:
+        return False
+    try:
+        await bot.send_chat_action(chat_id, "record_video_note")
+        await bot.send_video_note(chat_id, BufferedInputFile(data, filename="alena.mp4"))
+        return True
+    except Exception:
+        logger.warning("send_video_note failed", exc_info=True)
+        return False
 
 
 async def send_voice_to(bot, chat_id: int, text: str, reply_markup=None) -> bool:
