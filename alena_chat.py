@@ -654,12 +654,20 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
             if await send_voice_reply(message, reply, _pause_kbd()):
                 sent_voice = True
                 await log_event(user.id, "voice_reply", brain_phase)
-                # Ведение (фидбек Кая 02.07): после голосового — вопрос текстом перед
-                # глазами + что сделать. Голосовое прослушал и забыл, текст остаётся.
+                # Ведение: вопрос текстом перед глазами. НЕ как робот (мандат Кая):
+                # формулировки ротируются, инструкция «как отвечать» — только в первых
+                # двух ходах (дальше она уже знает), без вопроса — тишина, не шаблон.
                 q = _last_question(reply)
-                tail = (f"Мой вопрос: «{q}»\n\nОтветь текстом или голосовым 🎙" if q
-                        else "Ответь, как есть — текстом или голосовым 🎙")
-                await message.answer(tail, parse_mode=None)
+                if q:
+                    heads = ("Мой вопрос: «%s»", "«%s»", "Вопрос перед глазами: «%s»",
+                             "Оставлю здесь: «%s»")
+                    tail = heads[turns % len(heads)] % q
+                    if turns <= 2:
+                        tail += "\n\nОтветь текстом или голосовым 🎙"
+                    await message.answer(tail, parse_mode=None)
+                elif turns <= 1:
+                    await message.answer("Ответь, как есть — текстом или голосовым 🎙",
+                                         parse_mode=None)
         if not sent_voice:
             await _send_alive(message, reply, _pause_kbd())
         # W7: чекпойнт пути на 5-м ходу — ощущение «меня ведут» (карта прогресса
