@@ -177,9 +177,12 @@ async def diagnose(history: list[dict], name, archetype,
 
 
 async def respond(directive: str, method_phase: str, name, archetype,
-                  history: list[dict]) -> str:
-    """ПРОХОД 2 — ответ голосом Алёны (Haiku 4.5), исполняет директиву."""
-    system = build_response_prompt(name, archetype, directive, method_phase)
+                  history: list[dict], voice_mode: bool = False) -> str:
+    """ПРОХОД 2 — ответ голосом Алёны (Haiku 4.5), исполняет директиву.
+
+    voice_mode=True → ответ будет озвучен: промпт требует устную речь (коротко,
+    без письменных конструкций, без тавтологии)."""
+    system = build_response_prompt(name, archetype, directive, method_phase, voice_mode)
     messages = _to_claude_messages(history)
     return await _call_claude(
         settings.brain_respond_model, system, messages,
@@ -198,8 +201,13 @@ async def brain_turn(history: list[dict], name, archetype,
     был слеп к 🔥). diagnose() крэш-сейф внутри. respond() может бросить — тогда бросаем
     наверх, вызывающий (_talk) фолбэчит на v1-путь в том же ходе."""
     dx = await diagnose(history, name, archetype, client_model, profile)
+    # Канал хода решается ЗДЕСЬ (единая точка): голос — если диагноз попросил ИЛИ
+    # фаза = истинный запрос/сдвиг (эмоц. пик по определению). Ответ тогда пишется
+    # как устная речь, и _talk шлёт его голосовым (cm["medium"]).
+    voice_out = (dx.get("medium") == "voice"
+                 or dx.get("method_phase") in ("name_true_request", "give_shift"))
     reply = await respond(dx.get("directive"), dx.get("method_phase"),
-                          name, archetype, history)
+                          name, archetype, history, voice_mode=voice_out)
 
     # Собираем модель клиентки для сохранения: обновление от диагноза + служебка.
     cm = dict(client_model) if isinstance(client_model, dict) else {}
@@ -208,9 +216,9 @@ async def brain_turn(history: list[dict], name, archetype,
         cm.update(new_cm)
     cm["method_phase"] = dx.get("method_phase")
     cm["track"] = dx.get("track")
-    # Директива канала ответа (H1): "voice" на эмоц. пике/сдвиге → _talk шлёт
-    # голосовым Алёны. Едет внутри cm, чтобы не менять сигнатуру brain_turn.
-    cm["medium"] = dx.get("medium") if dx.get("medium") in ("text", "voice") else "text"
+    # Директива канала ответа (H1): "voice" → _talk шлёт голосовым Алёны.
+    # Едет внутри cm, чтобы не менять сигнатуру brain_turn.
+    cm["medium"] = "voice" if voice_out else "text"
 
     signals = score_to_signals(dx.get("score"))
     track = dx.get("track") if isinstance(dx.get("track"), str) and dx.get("track") else None

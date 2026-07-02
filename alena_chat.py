@@ -16,6 +16,7 @@ import base64
 import io
 import json
 import logging
+import re
 
 import aiohttp
 from aiogram import Router, F
@@ -83,14 +84,13 @@ def _start_kbd() -> InlineKeyboardMarkup:
     ])
 
 
-def _pause_kbd() -> InlineKeyboardMarkup:
-    # Во время встречи — НИКАКИХ продающих кнопок (фидбек Кая 02.07: кнопка Клуба
-    # под каждой репликой ломает доверие; продаём, когда довели до готовности).
-    # Оффер живёт в своих моментах: закрытие (_after_close), затихшая встреча
-    # (stale nudge с кнопкой), дожимы. Здесь — только тихое «завершить».
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏸ завершить встречу", callback_data="alena:stop")],
-    ])
+def _pause_kbd() -> None:
+    # Во время встречи — НИКАКИХ кнопок вообще (фидбек Кая 02.07, две итерации:
+    # сначала убрали Клуб-CTA, потом и «завершить» — она мозолила на каждом ходе).
+    # Оффер живёт в своих моментах (закрытие/нудж/дожимы); выход — просто замолчать
+    # (stale-нудж мягко закроет) или /start. Хендлер alena:stop оставлен для старых
+    # сообщений с кнопкой.
+    return None
 
 
 def _club_only_kbd() -> InlineKeyboardMarkup:
@@ -157,16 +157,23 @@ _SHADOW_HOOK_Q = {
 def _shadow_opener(code: str) -> str:
     a = ARCHETYPES[code]
     q = _SHADOW_HOOK_Q.get(code, "Скажи честно — что у тебя сейчас болит на самом деле?")
-    return f"Вижу твою ведущую Тень — {a['name']}.\n\n{a['teaser']}\n\n{q}\n\n— Алёна"
+    return (f"Вижу твою ведущую Тень — {a['name']}.\n\n{a['teaser']}\n\n"
+            "Дальше — наша встреча: ты отвечаешь текстом или голосовым, я читаю и "
+            "отвечаю; иногда мне нужна минута — я не исчезаю.\n\n"
+            f"«{q}»\n\n— Алёна")
 
 
 def _shadow_opener_short(code: str) -> str:
-    # Кружок показал Тень и задал вопрос голосом — но человека нужно ВЕСТИ (фидбек
-    # Кая 02.07): дублируем вопрос текстом, чтобы он был перед глазами, и говорим,
-    # что именно сделать. Максимальное погружение = ясность на каждом шагу.
+    # Онбординг-рамка (фидбек Кая 02.07: «нет приветствия, не объясняется формат,
+    # непонятно что ведут»): что происходит, как устроено, чего ждать по времени —
+    # и вопрос из кружка текстом перед глазами. Одно сообщение, без простыни.
     q = _SHADOW_HOOK_Q.get(code, "Что у тебя сейчас болит на самом деле?")
-    return (f"Мой вопрос тебе — вот он, чтобы был перед глазами:\n\n«{q}»\n\n"
-            "Ответь, как есть — можно текстом, можно голосовым. Я здесь, слушаю.\n\n— Алёна")
+    return (
+        "Дальше — наша с тобой встреча. Как это устроено: ты пишешь или говоришь "
+        "голосовым — я читаю, думаю и отвечаю. Иногда голосовым. Иногда мне нужна "
+        "минута на ответ — я не исчезла, я думаю о тебе.\n\n"
+        f"Мой вопрос из кружка, чтобы был перед глазами:\n\n«{q}»\n\n"
+        "Ответь, как есть — текстом или голосовым.\n\n— Алёна")
 
 
 async def open_shadow_session(target: Message, user, code: str,
@@ -341,6 +348,13 @@ async def _generate(history: list[dict], name, povorot, archetype,
     return text
 
 
+def _last_question(text: str) -> str | None:
+    """Последний вопрос из реплики (для текст-дублёра после голосового)."""
+    qs = [s.strip() for s in re.findall(r"[^.!?…\n]*\?", text or "")]
+    qs = [q for q in qs if 6 <= len(q) <= 160]
+    return qs[-1] if qs else None
+
+
 # ── «Живое присутствие»: индикатор печати + паузы + разбивка на реплики ───────
 def _split_bubbles(text: str, max_bubbles: int = 3) -> list[str]:
     """Ответ → 1–3 «пузыря» по абзацам — как человек печатает несколькими сообщениями."""
@@ -378,14 +392,17 @@ async def _keep_typing(message, stop: "asyncio.Event"):
 
 
 async def _send_alive(message, text: str, reply_markup=None):
-    """Ответ Алёны «вживую»: печатает → пауза → приходит несколькими репликами."""
-    bubbles = _split_bubbles(text)
+    """Ответ Алёны «вживую»: печатает → пауза → приходит МАКСИМУМ двумя репликами.
+
+    Фидбек Кая 02.07: «текста выплывает много и сразу несколькими сообщениями —
+    сбивает» → не больше 2 пузырей и паузы длиннее (человек так печатает)."""
+    bubbles = _split_bubbles(text, max_bubbles=2)
     if not bubbles:
         return
     for i, chunk in enumerate(bubbles):
         last = (i == len(bubbles) - 1)
         await _typing(message)
-        await asyncio.sleep(min(3.2, max(0.8, len(chunk) / 48)))  # читает/думает/печатает
+        await asyncio.sleep(min(5.0, max(1.6, len(chunk) / 38)))  # читает/думает/печатает
         await message.answer(chunk, parse_mode=None,
                              reply_markup=(reply_markup if last else None))
 
@@ -539,13 +556,17 @@ async def _talk(message: Message, text: str):
         await _send_alive(message, reply)
         await _after_close(message, user, request)
     else:
-        # H1: диагноз попросил голос → реплика приходит ГОЛОСОВЫМ Алёны (кнопки те же).
-        # Пояс-и-подтяжки (фидбек Кая 02.07 «приходит текст»): на ключевых фазах метода
-        # (истинный запрос / сдвиг) голос форсируем независимо от решения диагноза —
-        # это эмоц. пик по определению. Любой сбой TTS → тот же текст, ход не теряется.
-        if brain_medium == "voice" or brain_phase in ("name_true_request", "give_shift"):
+        # H1: канал хода решён в brain_turn (диагноз ИЛИ ключевая фаза → voice, и
+        # текст уже написан как устная речь). Сбой TTS → тот же текст, ход не теряется.
+        if brain_medium == "voice":
             if await send_voice_reply(message, reply, _pause_kbd()):
                 await log_event(user.id, "voice_reply", brain_phase)
+                # Ведение (фидбек Кая 02.07): после голосового — вопрос текстом перед
+                # глазами + что сделать. Голосовое прослушал и забыл, текст остаётся.
+                q = _last_question(reply)
+                tail = (f"Мой вопрос: «{q}»\n\nОтветь текстом или голосовым 🎙" if q
+                        else "Ответь, как есть — текстом или голосовым 🎙")
+                await message.answer(tail, parse_mode=None)
                 return
         await _send_alive(message, reply, _pause_kbd())
 
