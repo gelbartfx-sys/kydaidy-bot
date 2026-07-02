@@ -160,10 +160,13 @@ def _shadow_opener(code: str) -> str:
     return f"Вижу твою ведущую Тень — {a['name']}.\n\n{a['teaser']}\n\n{q}\n\n— Алёна"
 
 
-def _shadow_opener_short() -> str:
-    # Когда видео-кружок уже показал её Тень и задал вопрос — не дублируем текстом,
-    # просто мягко зовём ответить (в т.ч. голосом).
-    return "Я здесь, слушаю.\n\nОтвечай, как есть — можно словами, можно голосовым."
+def _shadow_opener_short(code: str) -> str:
+    # Кружок показал Тень и задал вопрос голосом — но человека нужно ВЕСТИ (фидбек
+    # Кая 02.07): дублируем вопрос текстом, чтобы он был перед глазами, и говорим,
+    # что именно сделать. Максимальное погружение = ясность на каждом шагу.
+    q = _SHADOW_HOOK_Q.get(code, "Что у тебя сейчас болит на самом деле?")
+    return (f"Мой вопрос тебе — вот он, чтобы был перед глазами:\n\n«{q}»\n\n"
+            "Ответь, как есть — можно текстом, можно голосовым. Я здесь, слушаю.\n\n— Алёна")
 
 
 async def open_shadow_session(target: Message, user, code: str,
@@ -194,7 +197,7 @@ async def open_shadow_session(target: Message, user, code: str,
         await target.answer(DISCLAIMER)
     # Первый контакт — «вживую»: печатает → приходит пузырями (эффект присутствия).
     # Если видео-кружок уже показал Тень — текстовый хук короткий, без дубля.
-    opener = _shadow_opener_short() if video_hook else _shadow_opener(code)
+    opener = _shadow_opener_short(code) if video_hook else _shadow_opener(code)
     await _send_alive(target, opener, _pause_kbd())
     return True
 
@@ -427,10 +430,19 @@ async def _talk(message: Message, text: str):
     shadow = (u or {}).get("shadow_dist")
     dossier = (u or {}).get("dossier")
     archetype = None
+    profile = None   # индивидуальная карта для мозга: ПОЛНОЕ распределение + досье
     if shadow:
         counts = decode_distribution(shadow)
         if counts:
             archetype = ARCHETYPES[winner_from_counts(counts)]
+            # Комбинации у всех разные (фидбек Кая 02.07): мозг работает от полной
+            # смеси Теней из её теста, не только от ведущей. Топ-3 с процентами.
+            top = sorted(counts.items(), key=lambda kv: -kv[1])[:3]
+            mix = " · ".join(
+                f"{ARCHETYPES[c]['name']} {n * 10}%" for c, n in top if n > 0)
+            profile = f"смесь Теней из теста: {mix}"
+    if dossier:
+        profile = f"{profile + '. ' if profile else ''}досье прошлых встреч: {dossier[:600]}"
 
     turns = (sess.get("turns") or 0) + 1
     force_close = turns >= TURN_CAP
@@ -453,7 +465,7 @@ async def _talk(message: Message, text: str):
             try:
                 cm = await get_client_model(user.id)
                 reply, new_cm, brain_signals, brain_track = await brain_turn(
-                    history, user.first_name, archetype, cm)
+                    history, user.first_name, archetype, cm, profile)
                 await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
                 brain_phase = (new_cm or {}).get("method_phase")
                 brain_medium = (new_cm or {}).get("medium")
