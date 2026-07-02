@@ -809,6 +809,29 @@ async def show_dossier(message: Message):
         lines.append(f"Поворот: {g('povorot')}")
     if g("last_ai_request"):
         lines.append(f"Настоящий запрос: {g('last_ai_request')}")
+    # Рентген метод-петли (для тестов Кая): где сейчас встреча по мозгу v2.
+    try:
+        import json as _json
+        cm = _json.loads(g("client_model") or "{}")
+        phase_names = {
+            "contact": "1/6 контакт", "surface_facade": "2/6 фасад",
+            "catch_contradiction": "3/6 противоречие",
+            "name_true_request": "4/6 истинный запрос",
+            "give_shift": "5/6 сдвиг", "native_offer": "6/6 оффер (конец петли)",
+        }
+        if cm.get("method_phase"):
+            lines.append(
+                f"Фаза метода: {phase_names.get(cm['method_phase'], cm['method_phase'])}"
+                f" · канал: {cm.get('medium') or 'text'}"
+                f" · трек: {g('lead_track') or '—'}"
+                f" (ж{g('lead_heat') if g('lead_heat') is not None else '·'}"
+                f"/о{g('lead_open') if g('lead_open') is not None else '·'}"
+                f"/с{g('lead_resist') if g('lead_resist') is not None else '·'}"
+                f"/ц{g('lead_value') if g('lead_value') is not None else '·'})")
+        if cm.get("true_request_hypothesis"):
+            lines.append(f"Гипотеза запроса: {cm['true_request_hypothesis']}")
+    except Exception:
+        pass
     lines.append("\nПортрет (со встреч с AI-Алёной):\n" +
                  (g("dossier") or "— пока пусто (встречи ещё не было)"))
     await message.answer("\n".join(lines), parse_mode=None)
