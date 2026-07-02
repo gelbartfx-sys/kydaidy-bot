@@ -31,6 +31,7 @@ from alena_chat import alena_router, run_stale_session_tick
 from heygen_credits import run_credit_check
 from curator import curator_router, push_daily_batch, publish_tick
 from growth_agent import growth_router, run_growth_tick
+from followup import run_followup_tick
 from nurture import run_nurture_tick
 from webhooks import setup_webhooks
 
@@ -130,6 +131,11 @@ async def main():
     scheduler.add_job(
         run_stale_session_tick, "interval",
         minutes=settings.stale_nudge_tick_min, args=[bot])
+    # Волна 1 (H6/H7): дожим после оффера — серия из 3 касаний (45м/24ч/72ч).
+    # Оплатившие отфильтровываются в самом запросе; no-op при FOLLOWUP_ENABLED=0.
+    scheduler.add_job(
+        run_followup_tick, "interval",
+        minutes=settings.followup_tick_min, args=[bot])
     # HeyGen кредит-монитор: заранее пишет Каю, когда кредиты на исходе (живые
     # кружки коуча их тратят). No-op, пока не задан HEYGEN_API_KEY.
     scheduler.add_job(

@@ -205,6 +205,9 @@ async def brain_turn(history: list[dict], name, archetype,
         cm.update(new_cm)
     cm["method_phase"] = dx.get("method_phase")
     cm["track"] = dx.get("track")
+    # Директива канала ответа (H1): "voice" на эмоц. пике/сдвиге → _talk шлёт
+    # голосовым Алёны. Едет внутри cm, чтобы не менять сигнатуру brain_turn.
+    cm["medium"] = dx.get("medium") if dx.get("medium") in ("text", "voice") else "text"
 
     signals = score_to_signals(dx.get("score"))
     track = dx.get("track") if isinstance(dx.get("track"), str) and dx.get("track") else None

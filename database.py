@@ -130,6 +130,23 @@ CREATE TABLE IF NOT EXISTS ai_messages (
     content TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS funnel_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id INTEGER,
+    event TEXT,
+    meta TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS followups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id INTEGER,
+    stage INTEGER,
+    due_at TIMESTAMP,
+    sent_at TIMESTAMP,
+    status TEXT DEFAULT 'due'
+);
 """
 
 
@@ -302,6 +319,26 @@ _RUNTIME_MIGRATIONS = (
     """CREATE TABLE IF NOT EXISTS bot_meta (
         key TEXT PRIMARY KEY,
         value TEXT
+    )""",
+    # ── Волна 1 (H12): события воронки — гранулярное «где рвётся».
+    # Пишутся из хендлеров (portrait/kruzhok/session/voice/offer/дожимы);
+    # /sources показывает сводку. Любая ошибка записи глотается (log_event).
+    """CREATE TABLE IF NOT EXISTS funnel_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER,
+        event TEXT,
+        meta TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    # ── Волна 1 (H6/H7): дожим после оффера — серия из 3 отложенных касаний.
+    # Одна серия на человека (стадии 1..3), due_at считается при закрытии встречи.
+    """CREATE TABLE IF NOT EXISTS followups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER,
+        stage INTEGER,
+        due_at TIMESTAMP,
+        sent_at TIMESTAMP,
+        status TEXT DEFAULT 'due'
     )""",
 )
 
@@ -917,6 +954,90 @@ async def pq_counts():
         "SELECT channel, COUNT(*) AS n FROM post_queue WHERE status = 'queued' "
         "GROUP BY channel", fetch="all") or []
     return {r["channel"]: int(r["n"]) for r in rows}
+
+
+# ── Волна 1 (H12): события воронки ────────────────────────────────────────────
+
+async def log_event(tg_id: int, event: str, meta: str | None = None):
+    """Записать событие воронки. Крэш-сейф: телеметрия НИКОГДА не роняет поток."""
+    try:
+        await _exec(
+            "INSERT INTO funnel_events (tg_id, event, meta) VALUES (?, ?, ?)",
+            (tg_id, event, (meta or None)))
+    except Exception:
+        logger.warning("log_event(%s) failed (continuing)", event, exc_info=True)
+
+
+async def event_counts(days: int = 30):
+    """Сводка событий за N дней: {event: (всего, уникальных людей)}. Крэш-сейф."""
+    try:
+        rows = await _exec(
+            "SELECT event, COUNT(*) AS n, COUNT(DISTINCT tg_id) AS u "
+            f"FROM funnel_events WHERE datetime(created_at) > datetime('now', '-{int(days)} days') "
+            "GROUP BY event ORDER BY n DESC",
+            fetch="all") or []
+        return {r["event"]: (int(r["n"]), int(r["u"])) for r in rows}
+    except Exception:
+        logger.warning("event_counts failed (continuing)", exc_info=True)
+        return {}
+
+
+# ── Волна 1 (H6/H7): дожим после оффера — серия из 3 касаний ──────────────────
+
+async def followup_schedule(tg_id: int, delays_min: list[int]):
+    """Поставить серию дожимов (стадии 1..N через delays_min минут от «сейчас»).
+
+    Одна серия на человека за всю жизнь: если у него уже есть строки — no-op.
+    Крэш-сейф: сбой планирования не ломает закрытие встречи."""
+    try:
+        row = await _exec(
+            "SELECT 1 FROM followups WHERE tg_id = ? LIMIT 1", (tg_id,), fetch="one")
+        if row:
+            return
+        for stage, minutes in enumerate(delays_min, start=1):
+            # {:+d} → '+45'/'-5': валидный модификатор SQLite в обоих знаках
+            await _exec(
+                "INSERT INTO followups (tg_id, stage, due_at) "
+                f"VALUES (?, ?, datetime('now', '{int(minutes):+d} minutes'))",
+                (tg_id, stage))
+    except Exception:
+        logger.warning("followup_schedule failed (continuing)", exc_info=True)
+
+
+async def followups_due(limit: int = 30):
+    """Готовые к отправке касания: due_at прошёл, не отправлены, человек НЕ купил.
+
+    Оплатившие отфильтровываются прямо здесь (не полагаемся на отмену серии).
+    Крэш-сейф: при сбое вернём []."""
+    try:
+        return await _exec(
+            "SELECT f.id AS fid, f.tg_id AS tg_id, f.stage AS stage "
+            "FROM followups f "
+            "WHERE f.status = 'due' AND datetime(f.due_at) <= datetime('now') "
+            "AND f.tg_id NOT IN (SELECT tg_id FROM subscriptions WHERE active = 1) "
+            "AND f.tg_id NOT IN (SELECT tg_id FROM purchases) "
+            f"ORDER BY f.due_at ASC LIMIT {int(limit)}",
+            fetch="all") or []
+    except Exception:
+        logger.warning("followups_due failed (continuing)", exc_info=True)
+        return []
+
+
+async def followup_mark(fid: int, status: str = "sent"):
+    """Пометить касание: sent / skipped / cancelled. Метка ДО отправки (антидубль)."""
+    await _exec(
+        "UPDATE followups SET status = ?, sent_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (status, fid))
+
+
+async def followup_cancel_all(tg_id: int):
+    """Отменить несостоявшиеся касания (например, после оплаты). Крэш-сейф."""
+    try:
+        await _exec(
+            "UPDATE followups SET status = 'cancelled' "
+            "WHERE tg_id = ? AND status = 'due'", (tg_id,))
+    except Exception:
+        logger.warning("followup_cancel_all failed (continuing)", exc_info=True)
 
 
 # ── Hermes-руки: реактивация застрявших лидов ────────────────────────────────

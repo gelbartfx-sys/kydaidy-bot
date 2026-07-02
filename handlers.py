@@ -42,7 +42,7 @@ from database import (
     upsert_user, get_user, start_nurture, stop_nurture, get_user_purchases,
     set_tribute_post, get_tribute_post,
     has_generated_shadow, mark_shadow_generated, save_shadow_dist,
-    set_user_source, source_stats,
+    set_user_source, source_stats, log_event, event_counts,
 )
 from content_data import (
     POVOROT_RESULTS,
@@ -327,6 +327,7 @@ async def _send_shadow_kruzhok(message: Message, code: str) -> bool:
     try:
         await message.bot.send_chat_action(message.chat.id, "record_video_note")
         await message.answer_video_note(fid)
+        await log_event(message.from_user.id, "kruzhok_sent", code)
         return True
     except Exception:
         logger.warning("shadow kruzhok send failed for %s", code, exc_info=True)
@@ -423,6 +424,7 @@ async def on_photo(message: Message):
             render_profile, portrait, dist, message.from_user.first_name)
     except Exception as e:
         logger.exception(f"shadow generation failed for {tg_id} dist={dist}: {e}")
+        await log_event(tg_id, "portrait_fail")
         # УСТОЙЧИВОСТЬ (01.07): не рвём воронку при сбое картинки (напр. 429-квота Gemini).
         # Выдаём результат Тени ТЕКСТОМ (архетип статичен, без API) + призыв подписаться + продукты.
         try:
@@ -454,6 +456,7 @@ async def on_photo(message: Message):
         except Exception:
             pass
 
+    await log_event(tg_id, "portrait_ok", code)
     # Хостим портрет → ссылка на веб-профиль (HD-скачивание + шеринг).
     token = portrait_store.put(portrait)
     portrait_url = f"{BOT_PUBLIC_URL}/p/{token}"
@@ -901,6 +904,16 @@ async def cmd_sources(message: Message):
         " · портрет→разговор " + _pct(t_talk, t_port) +
         " · разговор→запрос " + _pct(t_req, t_talk) +
         " · запрос→💰 " + _pct(t_paid, t_req))
+    # Волна 1 (H12): гранулярные события за 30 дней — видно работу присутствия
+    # (voice_reply), офферов и дожимов, а не только агрегаты по людям.
+    ev = await event_counts(30)
+    if ev:
+        order = ("portrait_ok", "portrait_fail", "kruzhok_sent", "session_open",
+                 "voice_reply", "offer_shown", "stale_nudge",
+                 "followup_1", "followup_2", "followup_3")
+        parts = [f"{k} {ev[k][0]}({ev[k][1]}ч)" for k in order if k in ev]
+        parts += [f"{k} {v[0]}({v[1]}ч)" for k, v in ev.items() if k not in order]
+        lines.append("\nСобытия 30д (всего/людей):\n" + " · ".join(parts))
     await message.answer("\n".join(lines), parse_mode=None)
 
 

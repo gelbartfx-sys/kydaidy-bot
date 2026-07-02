@@ -34,7 +34,9 @@ from database import (
     ai_close_session, ai_set_last_request, save_dossier,
     ai_stale_sessions, ai_mark_nudged, save_lead_signals, set_lead_track,
     get_client_model, save_client_model,
+    log_event, followup_schedule,
 )
+from alena_voice import send_voice_reply
 from alena_persona import (
     build_system, DISCLAIMER, INTRO, CLOSE_MARK, is_crisis, CRISIS_REPLY,
     extract_request, extract_dossier, extract_score, strip_dangling_markers,
@@ -186,6 +188,7 @@ async def open_shadow_session(target: Message, user, code: str,
             reply_markup=_club_kbd(), parse_mode=None)
         return True
     await ai_open_session(user.id)  # списание бесплатной встречи — здесь
+    await log_event(user.id, "session_open", "auto")
     if await ai_total_sessions(user.id) <= 1:
         await target.answer(DISCLAIMER)
     # Первый контакт — «вживую»: печатает → приходит пузырями (эффект присутствия).
@@ -257,6 +260,7 @@ async def _do_start(callback: CallbackQuery):
         await callback.answer()
         return
     await ai_open_session(user.id)  # списание встречи — при старте
+    await log_event(user.id, "session_open", "manual")
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
@@ -442,6 +446,7 @@ async def _talk(message: Message, text: str):
     brain_signals = None      # скоринг из диагноза (brain-путь); в reply маркера нет
     brain_track = None
     brain_phase = None        # фаза метода из диагноза → триггер закрытия на native_offer
+    brain_medium = None       # H1: "voice" на эмоц. пике/сдвиге → ответ голосовым
     try:
         if settings.brain_v2_enabled:
             try:
@@ -450,6 +455,7 @@ async def _talk(message: Message, text: str):
                     history, user.first_name, archetype, cm)
                 await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
                 brain_phase = (new_cm or {}).get("method_phase")
+                brain_medium = (new_cm or {}).get("medium")
             except Exception as e:
                 logger.warning("brain_v2 turn failed for %s → fallback v1: %s", user.id, e,
                                exc_info=True)
@@ -520,6 +526,12 @@ async def _talk(message: Message, text: str):
         await _send_alive(message, reply)
         await _after_close(message, user, request)
     else:
+        # H1: диагноз попросил голос (эмоц. пик/сдвиг) → реплика приходит ГОЛОСОВЫМ
+        # Алёны (кнопки те же). Любой сбой TTS → тот же текст, ход не теряется.
+        if brain_medium == "voice":
+            if await send_voice_reply(message, reply, _pause_kbd()):
+                await log_event(user.id, "voice_reply", brain_phase)
+                return
         await _send_alive(message, reply, _pause_kbd())
 
 
@@ -611,12 +623,28 @@ async def run_stale_session_tick(bot):
         try:
             await bot.send_message(tg_id, _STALE_NUDGE_TEXT,
                                    reply_markup=_pause_kbd(), parse_mode=None)
+            await log_event(tg_id, "stale_nudge")
             sent += 1
         except Exception:
             logger.warning("stale nudge send failed for %s", tg_id, exc_info=True)
     if sent:
         logger.info("stale nudge: sent %s club offer(s) to quiet meetings", sent)
     return sent
+
+
+def _followup_delays() -> list[int]:
+    """settings.followup_delays_min ("45,1440,4320") → [45, 1440, 4320]. Крэш-сейф."""
+    try:
+        out = [int(x) for x in str(settings.followup_delays_min).split(",") if x.strip()]
+        return out[:3] or [45, 1440, 4320]
+    except Exception:
+        return [45, 1440, 4320]
+
+
+async def _schedule_followups(tg_id: int):
+    """H6: не купила после оффера → серия дожима (одна на человека, купившим не шлётся)."""
+    if settings.followup_enabled:
+        await followup_schedule(tg_id, _followup_delays())
 
 
 async def _after_close(message: Message, user, request: str | None = None):
@@ -627,6 +655,7 @@ async def _after_close(message: Message, user, request: str | None = None):
         q = request.strip().rstrip(".")
         if rem is None:
             # Член Клуба / whitelist → тёплый докрут в 1:1 (я тебя уже знаю).
+            await log_event(user.id, "offer_shown", "bridge_1on1")
             await message.answer(
                 f"Твой настоящий запрос — вот он:\n\n«{q}»\n\n"
                 "Я тебе его показала. Но показать — не значит прожить. Размотать это и "
@@ -638,16 +667,37 @@ async def _after_close(message: Message, user, request: str | None = None):
             return
         # Бесплатная встреча исчерпана → первая ступень = Клуб (низкий порог).
         # Копирайт Hermes: H1 (не ждёт) + H3 (ты из первых) + H5 (якорь цены).
-        await message.answer(
-            f"Твой настоящий запрос — вот он:\n\n«{q}»\n\n"
-            "Показать я показала. Но увидеть — не значит прожить. И оно не ждёт: каждую "
-            "неделю, что ты в это не смотришь, оно тихо выбирает за тебя.\n\n"
-            "В Клубе «Манифест» я рядом, пока ты это разматываешь — без лимита, в чате и "
-            "на эфирах каждую неделю. Клуб только открылся: ты заходишь одной из первых — "
-            "это твой круг с самого начала.\n\n"
-            "990 в месяц — меньше, чем кофе раз в неделю, чтобы не быть с этим одной. "
-            "А если захочешь сразу вглубь и лично — напиши, есть встреча 1:1.\n\n— Алёна",
-            reply_markup=_club_only_kbd(), parse_mode=None)
+        # H3 (Волна 1): личную часть оффера Алёна ГОВОРИТ голосом — доверие в момент
+        # решения. Голос ушёл → текстом остаётся короткое CTA + кнопка; сбой TTS →
+        # прежний полный текст, ничего не деградирует.
+        await log_event(user.id, "offer_shown", "club_request")
+        voiced = await send_voice_reply(
+            message,
+            f"Твой настоящий запрос — вот он: «{q}». Показать я показала. Но увидеть — "
+            "не значит прожить. И оно не ждёт: каждую неделю, что ты в это не смотришь, "
+            "оно тихо выбирает за тебя. Я рядом, пока ты это разматываешь — "
+            "если решишь не оставаться с этим одна.")
+        if voiced:
+            await log_event(user.id, "voice_reply", "offer")
+            await message.answer(
+                "В Клубе «Манифест» я рядом без лимита — в чате и на эфирах каждую "
+                "неделю. Клуб только открылся: ты заходишь одной из первых.\n\n"
+                "990 в месяц — меньше, чем кофе раз в неделю, чтобы не быть с этим "
+                "одной. А если захочешь сразу вглубь и лично — напиши, есть встреча "
+                "1:1.\n\n— Алёна",
+                reply_markup=_club_only_kbd(), parse_mode=None)
+        else:
+            await message.answer(
+                f"Твой настоящий запрос — вот он:\n\n«{q}»\n\n"
+                "Показать я показала. Но увидеть — не значит прожить. И оно не ждёт: каждую "
+                "неделю, что ты в это не смотришь, оно тихо выбирает за тебя.\n\n"
+                "В Клубе «Манифест» я рядом, пока ты это разматываешь — без лимита, в чате и "
+                "на эфирах каждую неделю. Клуб только открылся: ты заходишь одной из первых — "
+                "это твой круг с самого начала.\n\n"
+                "990 в месяц — меньше, чем кофе раз в неделю, чтобы не быть с этим одной. "
+                "А если захочешь сразу вглубь и лично — напиши, есть встреча 1:1.\n\n— Алёна",
+                reply_markup=_club_only_kbd(), parse_mode=None)
+        await _schedule_followups(user.id)
         return
 
     # Запроса не вскрылось / ей хватило — честно, без втюхивания.
@@ -655,9 +705,11 @@ async def _after_close(message: Message, user, request: str | None = None):
         await message.answer(
             "На сегодня всё. Ещё разговор — просто /alena.", reply_markup=_menu_kbd())
         return
+    await log_event(user.id, "offer_shown", "club_soft")
     await message.answer(
         "Это была твоя бесплатная встреча — одна на человека.\n\n"
         "Если захочешь продолжить — я рядом регулярно в Клубе «Манифест»: без лимита, "
         "в чате и на эфирах. Клуб только открылся, ты заходишь одной из первых. "
         "990 в месяц — чтобы не быть с этим одной.",
         reply_markup=_club_only_kbd())
+    await _schedule_followups(user.id)
