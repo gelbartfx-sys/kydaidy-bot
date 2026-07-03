@@ -318,7 +318,9 @@ _KRUZHOK_FILE_IDS: dict[str, str] = {
     "H": "DQACAgUAAxkDAAIB6GpE9OnLzzB4LLxXV1tK0EUIumyTAAK4IgACO4spVogQilfJMhy-PAQ",
     "F": "DQACAgUAAxkDAAIB6WpE9PNvG1uo9jREw-T8weqQVbCHAAK5IgACO4spVkoDRu5PgGWNPAQ",
     "R": "DQACAgUAAxkDAAIB6mpE9P-xlddKgUM9Y3_251-u5P-NAAK6IgACO4spVu1CSHRs-u3LPAQ",
-    "D": "DQACAgUAAxkDAAIB62pE9UJ96ogbQxOGZVRI5A4533VCAAK7IgACO4spVk2lnWq6xIqkPAQ",
+    # D перегенерён 03.07: TTS-дефолты + «разруши́тельница» (U+0301) + motionPrompt
+    # моргания (avatar_v). Аудио-эталон: scratchpad/kruzhki/arch/D_regen_v2.mp3.
+    "D": "DQACAgUAAxkDAAIC1mpHhE8PjoQDnyMndlOJ8k-cwN7ZAALUHwACspI4Vg0tLkA39bCvPAQ",
     "Q": "DQACAgUAAxkDAAIB7GpE9VjpcdqeF6wuzrJ_9cajVq-CAAK8IgACO4spVk92J0ehk4XgPAQ",
     "M": "DQACAgUAAxkDAAIB7WpE9Wej88AE_epZojKjR9W5izUpAAK9IgACO4spVuRvGsb_IrczPAQ",
     "MR": "DQACAgUAAxkDAAIB7mpE9XYN4kdrKH21sLED6N9hZXrfAAK_IgACO4spVlHC4FrXzg2OPAQ",
