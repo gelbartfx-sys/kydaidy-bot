@@ -52,7 +52,8 @@ logger = logging.getLogger(__name__)
 alena_router = Router()
 
 FREE_SESSIONS = 1          # бесплатных встреч на человека (пожизненно)
-TURN_CAP = 20              # предохранитель: после стольких реплик — мягкое закрытие
+TURN_CAP = 12              # предохранитель: после стольких реплик — мягкое закрытие
+                           # (20→12 по прогону Кая 03.07: v1 жевал по кругу)
 HISTORY_LIMIT = 40         # сколько сообщений истории отдаём модели
 ONE_ON_ONE_URL = "https://web.tribute.tg/p/vKG"
 CLUB_URL = "https://t.me/tribute/app?startapp=sULY"
@@ -723,6 +724,13 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
             except Exception as e:
                 logger.warning("brain_v2 turn failed for %s → fallback v1: %s", user.id, e,
                                exc_info=True)
+                # Телеметрия в D1: падение мозга не должно прятаться в логах Render
+                # (03.07 весь день сидели на v1 и не видели этого).
+                try:
+                    await log_event(user.id, "brain_fail",
+                                    f"{type(e).__name__}: {str(e)[:120]}")
+                except Exception:
+                    pass
                 reply = None  # → фолбэк ниже на v1-путь
 
         if reply is None:
