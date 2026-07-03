@@ -814,6 +814,17 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
                                     f"{type(e).__name__}: {str(e)[:120]}")
                 except Exception:
                     pass
+                # Сирена админу: ДВОЙНОЙ отказ (мозг+v1) = клиентка в тишине.
+                # Обрыв 03.07 обнаружился только из жалобы Кая — так нельзя.
+                try:
+                    if settings.tg_admin_id:
+                        await message.bot.send_message(
+                            settings.tg_admin_id,
+                            f"🚨 Воронка: оба движка упали (юзер {user.id}). "
+                            f"v1: {type(e).__name__}: {str(e)[:150]}. "
+                            "Проверь brain_fail/v1_fail в D1.")
+                except Exception:
+                    pass
                 await message.answer(
                     "Я тут — но прямо сейчас ответить не получается. "
                     "Попробуй чуть позже или напиши @kydaidy.",
