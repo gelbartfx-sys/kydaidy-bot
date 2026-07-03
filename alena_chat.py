@@ -32,7 +32,8 @@ from database import (
     get_user, get_active_subscription,
     ai_active_session, ai_total_sessions,
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
-    ai_close_session, ai_close_all_active, ai_set_last_request, save_dossier,
+    ai_close_session, ai_close_all_active, ai_session_idle_minutes,
+    ai_set_last_request, save_dossier,
     ai_stale_sessions, ai_orphan_sessions, ai_mark_nudged, save_lead_signals, set_lead_track,
     get_client_model, save_client_model,
     log_event, followup_schedule, get_lead_signals, add_circle_credits,
@@ -204,8 +205,22 @@ async def open_shadow_session(target: Message, user, code: str,
     """
     if not settings.gemini_key:
         return False
-    if await ai_active_session(user.id):
-        return True  # уже говорим — не дублируем
+    sess = await ai_active_session(user.id)
+    if sess:
+        # Баг прогона №3 (03.07 08:09): встреча, убитая редеплоем, висела
+        # «active» — новый путь упирался в неё, и после кружка была ТИШИНА.
+        # Живую беседу (<15 мин активности) не дублируем, но и не молчим;
+        # осиротевшую — закрываем и открываем путь заново.
+        idle = await ai_session_idle_minutes(sess["id"])
+        if idle is not None and idle < 15:
+            await target.answer("Мы уже во встрече — просто продолжай, я здесь.")
+            return True
+        try:
+            await ai_close_all_active(user.id)
+            await log_event(user.id, "session_reopen_stale", str(sess["id"]))
+        except Exception:
+            logger.warning("stale session close failed", exc_info=True)
+            return True  # закрыть не смогли — не плодим вторую активную
     rem = await _remaining(user)
     if rem is not None and rem <= 0:
         # бесплатная встреча исчерпана → хук как тизер + Клуб (без траты модели).

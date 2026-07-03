@@ -795,6 +795,25 @@ async def ai_open_session(tg_id: int):
     return await ai_active_session(tg_id)
 
 
+async def ai_session_idle_minutes(session_id: int) -> float | None:
+    """Минут с последней активности встречи (последнее сообщение, иначе старт).
+    Для детекта встреч-сирот, убитых редеплоем (прогон №3 03.07: висящая active
+    глотала новый путь после кружка). Крэш-сейф: сбой → None."""
+    try:
+        row = await _exec(
+            "SELECT (julianday('now') - julianday(COALESCE("
+            "  (SELECT MAX(created_at) FROM ai_messages WHERE session_id = s.id),"
+            "  s.started_at))) * 1440.0 AS idle_min "
+            "FROM ai_sessions s WHERE s.id = ?",
+            (session_id,), fetch="one")
+        if row is None or row.get("idle_min") is None:
+            return None
+        return float(row["idle_min"])
+    except Exception:
+        logger.warning("ai_session_idle_minutes failed (degraded)", exc_info=True)
+        return None
+
+
 async def ai_close_all_active(tg_id: int):
     """A2: закрыть ВСЕ активные встречи юзера (раньше закрывалась только новейшая —
     осиротевшая старая жила вечно и давала безлимит модели)."""
