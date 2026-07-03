@@ -854,6 +854,26 @@ async def ai_stale_sessions(minutes: int, limit: int = 50):
         return []
 
 
+async def ai_orphan_sessions(minutes: int = 3, limit: int = 20):
+    """T-1 (03.07): активные встречи, где последнее сообщение — от ЧЕЛОВЕКА и
+    висит без ответа дольше `minutes` (редеплой убил ход посреди генерации).
+    Крэш-сейф: сбой → [] (деградирует только само-восстановление)."""
+    try:
+        return await _exec(
+            "SELECT s.id AS session_id, s.tg_id AS tg_id "
+            "FROM ai_sessions s "
+            "JOIN ai_messages m ON m.id = ("
+            "    SELECT id FROM ai_messages WHERE session_id = s.id "
+            "    ORDER BY id DESC LIMIT 1) "
+            "WHERE s.status = 'active' AND m.role = 'user' "
+            f"AND datetime(m.created_at) < datetime('now', '-{int(minutes)} minutes') "
+            f"LIMIT {int(limit)}",
+            fetch="all") or []
+    except Exception:
+        logger.warning("ai_orphan_sessions failed (degraded)", exc_info=True)
+        return []
+
+
 async def ai_mark_nudged(session_id: int):
     """Пометить, что на этой встрече уже слали мягкий оффер Клуба (один на встречу)."""
     await _exec(

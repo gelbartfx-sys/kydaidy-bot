@@ -33,7 +33,7 @@ from database import (
     ai_active_session, ai_total_sessions,
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
     ai_close_session, ai_close_all_active, ai_set_last_request, save_dossier,
-    ai_stale_sessions, ai_mark_nudged, save_lead_signals, set_lead_track,
+    ai_stale_sessions, ai_orphan_sessions, ai_mark_nudged, save_lead_signals, set_lead_track,
     get_client_model, save_client_model,
     log_event, followup_schedule, get_lead_signals, add_circle_credits,
     ai_last_session, events_count_recent,
@@ -181,18 +181,16 @@ def _shadow_opener(code: str) -> str:
 
 
 def _shadow_opener_short(code: str) -> str:
-    # Онбординг-рамка (фидбек Кая 02.07: «нет приветствия, не объясняется формат,
-    # непонятно что ведут»): что происходит, как устроено, чего ждать по времени —
-    # и вопрос из кружка текстом перед глазами. Одно сообщение, без простыни.
+    # Текст-фолбэк голосового онбординга (слово «кружок» на экране допустимо).
+    # Аудит 03.07 №4: без «не тот, что сверху», без «Смысл:»/«Правила простые».
     q = _SHADOW_HOOK_Q.get(code, "Что у тебя сейчас болит на самом деле?")
     return (
-        "Это твоя пробная сессия со мной — одна, бесплатная, как настоящая встреча "
+        "Это твоя пробная встреча со мной — одна, бесплатная, как разговор "
         "один на один.\n\n"
-        "Смысл: твоя анкета показала, ГДЕ ты защищаешься. Здесь мы найдём, ЧТО за "
-        "этим стоит на самом деле — твой настоящий запрос, а не тот, что сверху.\n\n"
-        "Правила простые: отвечай честно, как есть — текстом или голосовым. Я читаю, "
-        "думаю и отвечаю, иногда голосом. Если молчу минуту — я не исчезла, я думаю "
-        "о тебе.\n\n"
+        "Твой тест показал, ГДЕ ты закрываешься. Здесь найдём, ЧТО за этим "
+        "прячется — то настоящее, что обычно молчит под защитой.\n\n"
+        "Отвечай честно, как есть — текстом или голосовым. Я читаю, думаю и "
+        "отвечаю, чаще голосом. Замолчу на минуту — не исчезла, думаю о тебе.\n\n"
         f"Начнём с вопроса из кружка:\n\n«{q}»\n\n— Алёна")
 
 
@@ -236,27 +234,32 @@ async def open_shadow_session(target: Message, user, code: str,
     who = f"{name}, это" if name else "Это"
     # ⚠️ В озвучке слова «кружок/кружке» НЕТ нигде: TTS читает «в крУжке» (как
     # кружка-чашка) — фидбек Кая 03.07. В голосе говорим «видео»/«на видео».
+    # Тексты — аудит логики 03.07 (№1–2): без «не тот, что сверху» (запроса ещё
+    # не было — якорим к тесту), без «правила простые», с «о себе» через историю.
     if video_hook:
-        # Кружок УЖЕ поздоровался и задал вопрос — голосовое продолжает его как
-        # онбординг: где мы → правила → что делать дальше (фидбек Кая 03.07).
-        hello = (f"{who} была я — только что, на видео. Теперь — где мы: прямо "
-                 "сейчас началась твоя пробная сессия. Одна, бесплатная, как "
-                 "настоящая встреча один на один. Мы найдём, что стоит за твоей "
-                 "Тенью — твой настоящий запрос, а не тот, что сверху. Правила "
-                 "простые: отвечай честно, как есть — голосом или текстом, как "
-                 "тебе удобнее. Я отвечаю голосом. Если замолчала на минуту — я "
-                 "не исчезла, я думаю о тебе. Что делать сейчас: под этим "
-                 "сообщением мой вопрос и подсказки. Нажми ту, что отзывается, "
-                 "или ответь своими словами. В конце встречи скажу тебе главное "
-                 "— лично.")
+        hello = (f"{who} была я — только что, на видео. Ну вот и встретились "
+                 "по-настоящему. Пара слов, чтобы ты знала, с кем говоришь: пяти "
+                 "шагов к счастью у меня нет, и по голове гладить не буду. Я сама "
+                 "когда-то решила, что близость и семья — не для меня. Считала "
+                 "это силой. Оказалось — броня, за которой я пряталась. Свою я "
+                 "сняла — теперь рядом с теми, кто снимает свою. А теперь про "
+                 "сейчас. Это твоя пробная встреча — бесплатная, и она у нас "
+                 "одна, как живой разговор один на один. Твой тест показал, где "
+                 "ты закрываешься. Здесь поищем, что за этой закрытостью прячется "
+                 "на самом деле. Отвечай как есть — голосом или словами, как "
+                 "удобнее. Я отвечаю голосом. Замолчу на минуту — значит, не "
+                 "исчезла, просто думаю. Под этим сообщением мой первый вопрос и "
+                 "подсказки. Нажми ту, что отзывается, или скажи сама. А в конце "
+                 "подведём главное.")
     else:
-        hello = ((f"{name}, привет. Это я, Алёна. " if name else "Привет. Это я, Алёна. ") +
-                 "Где мы: началась твоя пробная сессия — одна, бесплатная, как "
-                 "настоящая встреча один на один. По твоей анкете мы найдём твой "
-                 "настоящий запрос — не тот, что сверху. Правила простые: отвечай "
-                 "честно, как есть — голосом или текстом. Я отвечаю голосом. Если "
-                 "я замолчала на минуту — я думаю о тебе. Что делать сейчас: ниже "
-                 "мой вопрос и подсказки — нажми свою или скажи сама. " + q)
+        hello = ("Ну вот, дошли до главного. Пара слов о себе: я не раздаю формул "
+                 "счастья — я и сама когда-то думала, что семья не для меня, а это "
+                 "оказалась не уверенность, а защита. Свою я сняла. Это твоя "
+                 "пробная встреча — бесплатная, одна, как разговор один на один. "
+                 "Тест показал, где ты закрываешься; здесь поищем, что под этим. "
+                 "Отвечай как есть — голосом или словами. Я отвечаю голосом. "
+                 "Замолчу на минуту — не пропала, просто думаю. Мой первый "
+                 "вопрос — ниже. " + q)
     if await send_voice_reply(target, hello):
         await log_event(user.id, "voice_reply", "opener")
     else:
@@ -457,11 +460,18 @@ async def _do_start(callback: CallbackQuery):
     except Exception:
         pass
     # Рамка-онбординг ГОЛОСОМ (мандат 03.07), вопрос — текстом; фолбэк — текст.
-    frame = ("Это твоя пробная сессия со мной — одна, бесплатная, как настоящая "
-             "встреча один на один. Смысл: найти твой настоящий запрос — не тот, "
-             "что сверху. Правила простые: отвечай честно, как есть — голосом или "
-             "текстом. Я отвечаю голосом. Если молчу минуту — я не исчезла, я "
-             "думаю. Расскажи, что привело — с чем ты сейчас?")
+    # Аудит 03.07 №3/№5: тут НЕТ ни теста, ни Тени — никакого «не тот, что
+    # сверху»; знакомство + «о себе», честно про AI (мог прийти без дисклеймера в
+    # памяти).
+    frame = ("Привет. Это я, Алёна — живая, только в виде AI, обученного на моём "
+             "подходе. Коротко о себе: пяти шагов к счастью у меня нет, и гладить "
+             "по голове не буду. Я сама когда-то решила, что близость не для "
+             "меня — пока не поняла, что это была защита, а не выбор. Это твоя "
+             "пробная встреча — бесплатная, одна, как разговор один на один. То, "
+             "что скажешь первым, — ещё не всё; под ним мы и поищем настоящее. "
+             "Отвечай честно, как есть — голосом или словами. Я отвечаю голосом. "
+             "Замолчу на минуту — значит, думаю. Расскажи, что тебя привело. С "
+             "чем ты сейчас?")
     if await send_voice_reply(callback.message, frame):
         await log_event(user.id, "voice_reply", "opener")
         await callback.message.answer(
@@ -469,11 +479,12 @@ async def _do_start(callback: CallbackQuery):
             "Ответь текстом или голосовым 🎙", parse_mode=None)
     else:
         await callback.message.answer(
-            "Это твоя пробная сессия со мной — одна, бесплатная, как настоящая встреча "
-            "один на один. Смысл: найти твой настоящий запрос — не тот, что сверху.\n\n"
-            "Правила простые: отвечай честно, как есть — текстом или голосовым. Я читаю, "
-            "думаю и отвечаю голосом. Если молчу минуту — я не исчезла, я думаю.\n\n"
-            "Расскажи, что привело — с чем ты сейчас?\n\n— Алёна",
+            "Это твоя пробная встреча со мной — одна, бесплатная, как разговор "
+            "один на один. То, что скажешь первым, — ещё не всё; под ним мы и "
+            "поищем настоящее.\n\n"
+            "Отвечай честно, как есть — текстом или голосовым. Я читаю, думаю и "
+            "отвечаю голосом. Замолчу на минуту — не исчезла, думаю.\n\n"
+            "Расскажи, что тебя привело — с чем ты сейчас?\n\n— Алёна",
             reply_markup=_pause_kbd(),
         )
     await callback.answer()
@@ -883,18 +894,26 @@ class _InAlenaVideoFilter(BaseFilter):
             return False
 
 
-async def _transcribe_video_note(bot, video_note) -> str:
-    """Видео-кружок Telegram (mp4) → текст через Gemini (мультимодальный вход)."""
+async def _transcribe_video_note(bot, video_note) -> tuple[str, str]:
+    """Видео-кружок Telegram (mp4) → (речь дословно, невербалика) через Gemini.
+
+    T-2 (мандат Кая 03.07): помимо слов читаем КАДР — эмоциональное состояние,
+    несовпадение слов и лица (приём Мурадяна «слово↔тело»). Невербалика идёт
+    мозгу служебной припиской, человеку не показывается."""
     buf = io.BytesIO()
     await bot.download(video_note, destination=buf)
     b64 = base64.b64encode(buf.getvalue()).decode()
     payload = {
         "contents": [{"parts": [
             {"inline_data": {"mime_type": "video/mp4", "data": b64}},
-            {"text": "Расшифруй русскую речь из этого видео в текст дословно. "
-                     "Верни ТОЛЬКО расшифровку, без кавычек и комментариев."},
+            {"text": "Видео-сообщение женщины на русском. Верни СТРОГО JSON без "
+                     "пояснений: {\"speech\": \"дословная расшифровка речи\", "
+                     "\"nonverbal\": \"1-2 фразы: эмоциональное состояние в кадре "
+                     "(мимика, глаза, голос, паузы) и совпадает ли оно со словами; "
+                     "пиши только наблюдаемое, без диагнозов\"}"},
         ]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 1024,
+                             "responseMimeType": "application/json",
                              "thinkingConfig": {"thinkingBudget": 0}},
     }
     url = f"{BASE}/models/{TEXT_MODEL}:generateContent?key={settings.gemini_key}"
@@ -903,26 +922,36 @@ async def _transcribe_video_note(bot, video_note) -> str:
                           timeout=aiohttp.ClientTimeout(total=120)) as r:
             body = await r.json()
     parts = body.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-    return "".join(p.get("text", "") for p in parts).strip()
+    raw = "".join(p.get("text", "") for p in parts).strip()
+    try:
+        d = json.loads(raw)
+        return (d.get("speech") or "").strip(), (d.get("nonverbal") or "").strip()
+    except (json.JSONDecodeError, AttributeError):
+        return raw, ""   # Gemini вернул не-JSON → трактуем как чистую расшифровку
 
 
 @alena_router.message(_InAlenaVideoFilter())
 async def on_alena_video_note(message: Message):
-    """Человек ответил КРУЖКОМ → распознаём и ведём как обычный ход (голосом в ответ)."""
+    """Человек ответил КРУЖКОМ → распознаём речь+невербалику → обычный ход."""
     if not settings.gemini_key:
         await message.answer("Кружок сейчас не распознаю — скажи голосовым или текстом.",
                              parse_mode=None)
         return
     try:
-        text = await _transcribe_video_note(message.bot, message.video_note)
+        text, nonverbal = await _transcribe_video_note(message.bot, message.video_note)
     except Exception:
         logger.exception("video note transcribe failed for %s", message.from_user.id)
-        text = ""
+        text, nonverbal = "", ""
     if not text:
         await message.answer("Не расслышала кружок — скажи ещё раз или напиши.",
                              parse_mode=None)
         return
+    # Человек видит только свою речь; невербалика — служебная приписка мозгу
+    # внутри реплики (история сессии), наружу не звучит.
     await message.answer(f"🎥 {text}", parse_mode=None)
+    if nonverbal:
+        await log_event(message.from_user.id, "video_nonverbal")
+        text = f"{text}\n[видно в кадре: {nonverbal}]"
     await _talk(message, text, by_voice=True)
 
 
@@ -1014,6 +1043,53 @@ _STALE_NUDGE_VOICE = (
     "день в Клубе «Манифест»: без лимита наших встреч, в чате и на эфирах. "
     "Дверь — под этим сообщением."
 )
+
+
+# ── T-1 (03.07): само-восстановление потерянного хода ─────────────────────────
+# Render-редеплой убивает контейнер посреди генерации (15–40с): реплика клиентки
+# записана, ответа Алёны нет — тишина (вскрыто прогоном Кая 03.07 12:00).
+# Тик находит такие встречи и доотвечает сам.
+async def run_orphan_turn_tick(bot):
+    rows = await ai_orphan_sessions(minutes=3)
+    healed = 0
+    for r in rows:
+        sid, tg_id = r.get("session_id"), r.get("tg_id")
+        if not sid or not tg_id:
+            continue
+        try:
+            history = await ai_get_messages(sid, HISTORY_LIMIT)
+            if not history or history[-1].get("role") != "user":
+                continue  # гонка: ответ уже пришёл — не дублируем
+            u = await get_user(tg_id)
+            shadow = (u or {}).get("shadow_dist")
+            archetype = None
+            profile = None
+            if shadow:
+                counts = decode_distribution(shadow)
+                if counts:
+                    archetype = ARCHETYPES[winner_from_counts(counts)]
+            if (u or {}).get("dossier"):
+                profile = f"досье прошлых встреч: {(u or {}).get('dossier')[:600]}"
+            name = None  # имени из Message тут нет; мозг ведёт без обращения
+            reply, new_cm, signals, track = await brain_turn(
+                history, name, archetype, await get_client_model(tg_id),
+                profile, fresh=False)
+            await save_client_model(tg_id, json.dumps(new_cm, ensure_ascii=False))
+            reply = strip_dangling_markers(
+                extract_score(extract_dossier(extract_request(
+                    reply.replace(CLOSE_MARK, ""))[0])[0])[0]).strip()
+            if not reply:
+                continue
+            await ai_add_message(sid, tg_id, "model", reply)
+            if not await send_voice_to(bot, tg_id, reply):
+                await bot.send_message(tg_id, reply, parse_mode=None)
+            await log_event(tg_id, "orphan_recovered")
+            healed += 1
+        except Exception:
+            logger.warning("orphan recover failed for %s", tg_id, exc_info=True)
+    if healed:
+        logger.info("orphan tick: восстановлено ходов — %s", healed)
+    return healed
 
 
 async def run_stale_session_tick(bot):
@@ -1166,9 +1242,10 @@ async def _after_close(message: Message, user, request: str | None = None):
         # и её запросом + кнопка. Сбой рендера → страховка текстом с кнопкой.
         await log_event(user.id, "offer_shown", "club_request")
         # ⚠️ Без слова «кружок» в озвучке (кривое ударение TTS — фидбек Кая 03.07).
+        # Аудит №8: честный тайминг (рендер твина 2–4 мин, не «пару минут»).
         teaser = (f"Твой настоящий запрос — вот он: «{q}». Показать я показала. "
-                  "Но главное я скажу тебе не текстом. Дай мне пару минут — "
-                  "запишу тебе видео. Лично тебе.")
+                  "Но главное скажу тебе не текстом. Не уходи — запишу тебе "
+                  "видео. Лично тебе, это займёт минуту-другую.")
         if not await send_voice_reply(message, teaser):
             await message.answer(teaser, parse_mode=None)
         _name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
