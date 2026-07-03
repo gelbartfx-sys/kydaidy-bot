@@ -89,6 +89,11 @@ _TOUCH3_TEXT = (
 )
 
 
+def _spoken(text: str) -> str:
+    """Текст касания → устная версия для TTS: без переносов и подписи «— Алёна»."""
+    return " ".join(text.replace("— Алёна", "").split())
+
+
 async def run_followup_tick(bot) -> int:
     """Фоновый джоб: отправить готовые касания. Возвращает число отправленных."""
     if not settings.followup_enabled:
@@ -117,11 +122,14 @@ async def run_followup_tick(bot) -> int:
                     await bot.send_message(tg_id, text + "\n\n— Алёна",
                                            reply_markup=_club_kbd(), parse_mode=None)
             elif stage == 2:
-                await bot.send_message(tg_id, _TOUCH2_TEXT,
-                                       reply_markup=_club_kbd(), parse_mode=None)
+                # Мандат Кая 03.07: все касания Алёны — голосом, фолбэк текст.
+                if not await send_voice_to(bot, tg_id, _spoken(_TOUCH2_TEXT), _club_kbd()):
+                    await bot.send_message(tg_id, _TOUCH2_TEXT,
+                                           reply_markup=_club_kbd(), parse_mode=None)
             else:
-                await bot.send_message(tg_id, _TOUCH3_TEXT,
-                                       reply_markup=_club_kbd(), parse_mode=None)
+                if not await send_voice_to(bot, tg_id, _spoken(_TOUCH3_TEXT), _club_kbd()):
+                    await bot.send_message(tg_id, _TOUCH3_TEXT,
+                                           reply_markup=_club_kbd(), parse_mode=None)
             await log_event(tg_id, f"followup_{stage}")
             sent += 1
         except Exception:

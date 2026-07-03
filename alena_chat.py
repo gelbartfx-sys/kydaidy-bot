@@ -38,7 +38,7 @@ from database import (
     log_event, followup_schedule, get_lead_signals, add_circle_credits,
     ai_last_session, events_count_recent,
 )
-from alena_voice import send_voice_reply, send_kruzhok_to
+from alena_voice import send_voice_reply, send_voice_to, send_kruzhok_to
 from lead_policy import should_spend_circle, CIRCLE_CREDITS
 from alena_persona import (
     build_system, DISCLAIMER, INTRO, CLOSE_MARK, is_crisis, CRISIS_REPLY,
@@ -138,20 +138,35 @@ _EXHAUSTED_TEXT = (
     "А если хочешь вглубь и со мной лично — сессия 1:1."
 )
 
+_EXHAUSTED_VOICE = (
+    "Бесплатная встреча у нас уже была — одна на человека. Хочешь говорить со "
+    "мной без лимита — это Клуб «Манифест»: безлимит наших встреч, эфир раз в "
+    "неделю и закрытый чат. А если хочешь вглубь и со мной лично — сессия один "
+    "на один. Обе двери — под этим сообщением."
+)
+
+
+async def _send_exhausted(target: Message):
+    """Оффер исчерпавшей лимит — голосом (мандат 03.07), фолбэк текст."""
+    if not await send_voice_reply(target, _EXHAUSTED_VOICE, _club_kbd()):
+        await target.answer(_EXHAUSTED_TEXT, reply_markup=_club_kbd())
+
 
 # ── Авто-контакт после теста Тени: Алёна заговаривает первой ──────────────────
-# Хук-вопрос под каждую Тень (её голос: коротко, в лицо, кончается вопросом,
-# от которого неуютно молчать). Рамку «Твоя Тень — X + тизер» собираем из ARCHETYPES.
+# Хук-вопрос под каждую Тень — ДОСЛОВНО как в отрендеренных кружках (транскрибация
+# 03.07, docs/hermes/funnel-fixes-2026-07-03.md). Кружок кончается этим вопросом →
+# текст на экране и кнопки обязаны продолжать ИМЕННО его (фидбек Кая: «кнопки не
+# сходятся с вопросом из кружка»). Менять только вместе с перегеном кружков.
 _SHADOW_HOOK_Q = {
-    "W": "Скажи честно: от кого ты чаще всего прячешь, что видишь?",
-    "Q": "Кому ты последний раз позволила подойти близко — и почему так давно?",
-    "H": "От кого ты ушла первой, хотя, если честно, не хотела?",
+    "W": "От кого ты прячешь то, что видишь?",
+    "Q": "Кому ты последний раз позволила подойти близко?",
+    "H": "Иногда ты уходишь от того, от кого не хотела. От кого?",
     "M": "Перед кем ты в последний раз сделала себя тише, чем ты есть?",
-    "F": "Кто видел тебя настоящую — без игры и проверок?",
-    "MR": "Кому ты отдала больше, чем осталось себе — и ждёшь, что вернут?",
-    "R": "Против чего ты бунтуешь так, что бьёт по тебе самой?",
-    "O": "Кого ты держишь на расстоянии, чтобы не успели уйти первыми?",
-    "D": "Что ты однажды сожгла дотла — и до сих пор об этом молчишь?",
+    "F": "Кто видел тебя настоящую — без игры?",
+    "MR": "Кому ты отдала больше, чем осталось себе?",
+    "R": "Против чего ты бунтуешь так, что задевает саму себя?",
+    "O": "Кого ты держишь на расстоянии, чтобы не потерять?",
+    "D": "Что ты однажды сожгла — и до сих пор молчишь?",
     "C": "Кого ты не впустила внутрь, хотя, может, хотела?",
 }
 
@@ -195,13 +210,18 @@ async def open_shadow_session(target: Message, user, code: str,
         return True  # уже говорим — не дублируем
     rem = await _remaining(user)
     if rem is not None and rem <= 0:
-        # бесплатная встреча исчерпана → хук как тизер + Клуб (без траты модели)
+        # бесплатная встреча исчерпана → хук как тизер + Клуб (без траты модели).
+        # Голосом (мандат 03.07), фолбэк текст.
         a = ARCHETYPES[code]
-        await target.answer(
-            f"Твоя Тень — {a['name']}. {a['teaser']}\n\n"
-            "Мы это уже начинали разбирать. Продолжить без лимита — в Клубе «Манифест»: "
-            "я рядом в чате и на эфирах, 990 ₽/мес.\n\n— Алёна",
-            reply_markup=_club_kbd(), parse_mode=None)
+        spent = (f"Твоя Тень — {a['name']}. {a['teaser']} Мы это уже начинали "
+                 "разбирать. Продолжить без лимита — в Клубе «Манифест»: я рядом "
+                 "в чате и на эфирах. Дверь — под этим сообщением.")
+        if not await send_voice_reply(target, spent, _club_kbd()):
+            await target.answer(
+                f"Твоя Тень — {a['name']}. {a['teaser']}\n\n"
+                "Мы это уже начинали разбирать. Продолжить без лимита — в Клубе «Манифест»: "
+                "я рядом в чате и на эфирах, 990 ₽/мес.\n\n— Алёна",
+                reply_markup=_club_kbd(), parse_mode=None)
         return True
     await ai_open_session(user.id)  # списание бесплатной встречи — здесь
     await log_event(user.id, "session_open", "auto")
@@ -214,40 +234,105 @@ async def open_shadow_session(target: Message, user, code: str,
     q = _SHADOW_HOOK_Q.get(code, "Что у тебя сейчас болит на самом деле?")
     name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
     who = f"{name}, это" if name else "Это"
+    # ⚠️ В озвучке слова «кружок/кружке» НЕТ нигде: TTS читает «в крУжке» (как
+    # кружка-чашка) — фидбек Кая 03.07. В голосе говорим «видео»/«на видео».
     if video_hook:
-        # Кружок УЖЕ поздоровался и задал вопрос — голосовое продолжает его, а не
-        # здоровается заново (фидбек Кая 02.07: «тупо звучит, состыковать логично»).
-        hello = (f"{who} была я — в кружке. И вопрос я тебе уже задала — он сейчас "
-                 "будет ниже, перед глазами. Дальше у нас настоящая пробная сессия: "
-                 "одна, бесплатная. Отвечай честно, как есть — текстом или голосовым. "
-                 "Если я замолчала на минуту — я не исчезла, я думаю о тебе.")
+        # Кружок УЖЕ поздоровался и задал вопрос — голосовое продолжает его как
+        # онбординг: где мы → правила → что делать дальше (фидбек Кая 03.07).
+        hello = (f"{who} была я — только что, на видео. Теперь — где мы: прямо "
+                 "сейчас началась твоя пробная сессия. Одна, бесплатная, как "
+                 "настоящая встреча один на один. Мы найдём, что стоит за твоей "
+                 "Тенью — твой настоящий запрос, а не тот, что сверху. Правила "
+                 "простые: отвечай честно, как есть — голосом или текстом, как "
+                 "тебе удобнее. Я отвечаю голосом. Если замолчала на минуту — я "
+                 "не исчезла, я думаю о тебе. Что делать сейчас: под этим "
+                 "сообщением мой вопрос и подсказки. Нажми ту, что отзывается, "
+                 "или ответь своими словами. В конце встречи скажу тебе главное "
+                 "— лично.")
     else:
         hello = ((f"{name}, привет. Это я, Алёна. " if name else "Привет. Это я, Алёна. ") +
-                 "Дальше у нас с тобой настоящая пробная сессия — одна, бесплатная. "
-                 "По твоей анкете мы найдём твой настоящий запрос — не тот, что сверху. "
-                 "Отвечай честно, как есть — текстом или голосовым. Если я замолчала "
-                 "на минуту — я думаю о тебе. Вот мой вопрос. " + q)
+                 "Где мы: началась твоя пробная сессия — одна, бесплатная, как "
+                 "настоящая встреча один на один. По твоей анкете мы найдём твой "
+                 "настоящий запрос — не тот, что сверху. Правила простые: отвечай "
+                 "честно, как есть — голосом или текстом. Я отвечаю голосом. Если "
+                 "я замолчала на минуту — я думаю о тебе. Что делать сейчас: ниже "
+                 "мой вопрос и подсказки — нажми свою или скажи сама. " + q)
     if await send_voice_reply(target, hello):
         await log_event(user.id, "voice_reply", "opener")
     else:
         await _send_alive(target, opener)
+    # Вопрос Алёны — В ИСТОРИЮ сессии (model-реплика): без этого первый ход
+    # клиентки прилетал мозгу без контекста — он не знал, на ЧТО она отвечает
+    # (корень «кнопки/ответы не сходятся с вопросом», фидбек Кая 03.07).
+    try:
+        sess = await ai_active_session(user.id)
+        if sess:
+            await ai_add_message(sess["id"], user.id, "model", f"«{q}»")
+    except Exception:
+        logger.warning("seed opener question to history failed", exc_info=True)
     # Вопрос + кнопки первого шага — ВСЕГДА отдельным сообщением (и при живом
     # голосе, и при текст-фолбэке), с собственной страховкой: сбой клавиатуры не
     # должен оставить человека без вопроса (фидбек Кая: «кнопки не появлялись»).
     try:
         await target.answer(
-            f"Мой вопрос — перед глазами:\n\n«{q}»\n\n"
-            "Ответь, как есть — или начни с подсказки:",
-            parse_mode=None, reply_markup=_first_step_kbd())
+            f"Мой вопрос:\n\n«{q}»\n\n"
+            "Ответь своими словами — текстом или голосовым 🎙 — или нажми, что ближе:",
+            parse_mode=None, reply_markup=_first_step_kbd(code))
         await log_event(user.id, "first_step_kbd")
     except Exception:
         logger.warning("first-step kbd failed (plain fallback)", exc_info=True)
-        await target.answer(f"Мой вопрос — перед глазами:\n\n«{q}»\n\n"
+        await target.answer(f"Мой вопрос:\n\n«{q}»\n\n"
                             "Ответь, как есть — текстом или голосовым.", parse_mode=None)
     return True
 
 
 # W1: кнопки первого шага — тап = первый ответ сделан, дальше говорит сама.
+# Пер-Тень (фидбек Кая 03.07: подсказки обязаны отвечать на вопрос ИЗ кружка).
+# Формат: код Тени → 3 × (label кнопки, полная реплика клиентки для мозга).
+_FIRST_STEPS_BY_SHADOW: dict[str, list[tuple[str, str]]] = {
+    # W: «От кого ты прячешь то, что видишь?»
+    "W": [("от того, кто рядом", "От того, кто рядом со мной. Ему я это не показываю."),
+          ("от родных", "От родных. Им нельзя видеть, что я всё считываю."),
+          ("ото всех", "Ото всех, наверное. Так спокойнее — не быть слишком.")],
+    # Q: «Кому ты последний раз позволила подойти близко?»
+    "Q": [("уже не помню", "Если честно — уже не помню. Это было давно."),
+          ("был один человек", "Был один человек. Но это плохо кончилось."),
+          ("никому не позволяю", "Никому. Я не подпускаю близко.")],
+    # H: «Иногда ты уходишь от того, от кого не хотела. От кого?»
+    "H": [("был такой человек", "Был такой человек. Я ушла первой, хотя не хотела."),
+          ("ухожу всегда я", "Ухожу всегда я. Не жду, пока уйдут от меня."),
+          ("не хочу вспоминать", "Есть от кого. Но вспоминать это тяжело.")],
+    # M: «Перед кем ты в последний раз сделала себя тише, чем ты есть?»
+    "M": [("перед партнёром", "Перед мужчиной, который рядом. С ним я тише, чем я есть."),
+          ("перед семьёй", "Перед семьёй. С ними я всю жизнь приглушаю себя."),
+          ("я всегда тише", "Да я всегда тише, чем есть. Уже привычка.")],
+    # F: «Кто видел тебя настоящую — без игры?»
+    "F": [("никто", "Никто, наверное. Все видели только игру."),
+          ("один человек — давно", "Один человек видел. Но это было давно."),
+          ("я и сама не видела", "Я и сама себя настоящую давно не видела.")],
+    # MR: «Кому ты отдала больше, чем осталось себе?»
+    "MR": [("партнёру", "Мужчине. Я растворилась в нём почти до нуля."),
+           ("семье", "Семье. Всю себя раздала — им."),
+           ("всем понемногу", "Всем понемногу. Себе не осталось.")],
+    # R: «Против чего ты бунтуешь так, что задевает саму себя?»
+    "R": [("против «как надо»", "Против «как надо». Против правил, которые мне навязали."),
+          ("против семьи", "Против семьи и того, что от меня ждали."),
+          ("против всего", "Кажется, против всего. И по мне это тоже бьёт.")],
+    # O: «Кого ты держишь на расстоянии, чтобы не потерять?»
+    "O": [("того, кто дорог", "Того, кто мне по-настоящему дорог."),
+          ("всех новых", "Всех новых. Ближе — страшно."),
+          ("всех", "Всех. Так хотя бы не бросят.")],
+    # D: «Что ты однажды сожгла — и до сих пор молчишь?»
+    "D": [("отношения", "Отношения. Я их сожгла сама — и молчу об этом."),
+          ("прошлую жизнь", "Прошлую жизнь. Целый кусок себя."),
+          ("не готова назвать", "Есть такое. Но назвать пока не готова.")],
+    # C: «Кого ты не впустила внутрь, хотя, может, хотела?»
+    "C": [("того, кто стучался", "Того, кто стучался дольше всех."),
+          ("уже никого", "Уже никого. Давно не впускаю."),
+          ("не помню, чтобы хотела", "Не помню, чтобы вообще хотела впускать.")],
+}
+
+# Легаси-подсказки: старые сообщения с callback alena:f1..f3 должны остаться живыми.
 _FIRST_STEPS = {
     "f1": "Это про отношения. Про то, что с ними у меня не складывается.",
     "f2": "Это про пустоту внутри. Всё вроде нормально, а внутри пусто.",
@@ -255,29 +340,41 @@ _FIRST_STEPS = {
 }
 
 
-def _first_step_kbd() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="про отношения", callback_data="alena:f1")],
-        [InlineKeyboardButton(text="про пустоту внутри", callback_data="alena:f2")],
-        [InlineKeyboardButton(text="про то, что я всех отталкиваю", callback_data="alena:f3")],
-        [InlineKeyboardButton(text="скажу сама…", callback_data="alena:f0")],
-    ])
+def _first_step_kbd(code: str | None = None) -> InlineKeyboardMarkup:
+    steps = _FIRST_STEPS_BY_SHADOW.get(code or "")
+    if steps:
+        rows = [[InlineKeyboardButton(text=label, callback_data=f"alena:fs:{code}:{i}")]
+                for i, (label, _) in enumerate(steps)]
+    else:  # нет Тени (ручной старт) → универсальные подсказки
+        rows = [[InlineKeyboardButton(text="про отношения", callback_data="alena:f1")],
+                [InlineKeyboardButton(text="про пустоту внутри", callback_data="alena:f2")],
+                [InlineKeyboardButton(text="про то, что я всех отталкиваю", callback_data="alena:f3")]]
+    rows.append([InlineKeyboardButton(text="скажу сама…", callback_data="alena:f0")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @alena_router.callback_query(F.data.startswith("alena:f"))
 async def cb_first_step(callback: CallbackQuery):
     """W1: выбор подсказки = первая реплика клиентки → обычный ход встречи."""
-    key = callback.data.split(":")[1]
+    parts = callback.data.split(":")
     await callback.answer()
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    if key == "f0":
+    text = None
+    if parts[1] == "fs" and len(parts) == 4:      # alena:fs:<code>:<n> — пер-Тень
+        steps = _FIRST_STEPS_BY_SHADOW.get(parts[2]) or []
+        try:
+            text = steps[int(parts[3])][1]
+        except (ValueError, IndexError):
+            text = None
+    elif parts[1] == "f0":
         await callback.message.answer("Я слушаю. Скажи, как есть — текстом или голосовым 🎙",
                                       parse_mode=None)
         return
-    text = _FIRST_STEPS.get(key)
+    else:                                          # легаси alena:f1..f3
+        text = _FIRST_STEPS.get(parts[1])
     if not text:
         return
     await callback.message.answer(f"— {text}", parse_mode=None)
@@ -293,7 +390,7 @@ async def _entry(target: Message, user):
         return
     rem = await _remaining(user)
     if rem is not None and rem <= 0:
-        await target.answer(_EXHAUSTED_TEXT, reply_markup=_club_kbd())
+        await _send_exhausted(target)
         return
     if await ai_total_sessions(user.id) == 0:
         await target.answer(DISCLAIMER)
@@ -342,23 +439,43 @@ async def _do_start(callback: CallbackQuery):
         return
     rem = await _remaining(user)
     if rem is not None and rem <= 0:
-        await callback.message.answer(_EXHAUSTED_TEXT, reply_markup=_club_kbd())
+        await _send_exhausted(callback.message)
         await callback.answer()
         return
     await ai_open_session(user.id)  # списание встречи — при старте
     await log_event(user.id, "session_open", "manual")
+    # Вопрос Алёны — в историю (контекст первого хода для мозга, как в авто-пути).
+    try:
+        sess = await ai_active_session(user.id)
+        if sess:
+            await ai_add_message(sess["id"], user.id, "model",
+                                 "«С чем ты сейчас? Что привело?»")
+    except Exception:
+        logger.warning("seed manual opener question failed", exc_info=True)
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    await callback.message.answer(
-        "Это твоя пробная сессия со мной — одна, бесплатная, как настоящая встреча "
-        "один на один. Смысл: найти твой настоящий запрос — не тот, что сверху.\n\n"
-        "Правила простые: отвечай честно, как есть — текстом или голосовым. Я читаю, "
-        "думаю и отвечаю, иногда голосом. Если молчу минуту — я не исчезла, я думаю.\n\n"
-        "Расскажи, что привело — с чем ты сейчас?\n\n— Алёна",
-        reply_markup=_pause_kbd(),
-    )
+    # Рамка-онбординг ГОЛОСОМ (мандат 03.07), вопрос — текстом; фолбэк — текст.
+    frame = ("Это твоя пробная сессия со мной — одна, бесплатная, как настоящая "
+             "встреча один на один. Смысл: найти твой настоящий запрос — не тот, "
+             "что сверху. Правила простые: отвечай честно, как есть — голосом или "
+             "текстом. Я отвечаю голосом. Если молчу минуту — я не исчезла, я "
+             "думаю. Расскажи, что привело — с чем ты сейчас?")
+    if await send_voice_reply(callback.message, frame):
+        await log_event(user.id, "voice_reply", "opener")
+        await callback.message.answer(
+            "Мой вопрос:\n\n«С чем ты сейчас? Что привело?»\n\n"
+            "Ответь текстом или голосовым 🎙", parse_mode=None)
+    else:
+        await callback.message.answer(
+            "Это твоя пробная сессия со мной — одна, бесплатная, как настоящая встреча "
+            "один на один. Смысл: найти твой настоящий запрос — не тот, что сверху.\n\n"
+            "Правила простые: отвечай честно, как есть — текстом или голосовым. Я читаю, "
+            "думаю и отвечаю голосом. Если молчу минуту — я не исчезла, я думаю.\n\n"
+            "Расскажи, что привело — с чем ты сейчас?\n\n— Алёна",
+            reply_markup=_pause_kbd(),
+        )
     await callback.answer()
 
 
@@ -643,35 +760,37 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
         await ai_close_all_active(user.id)   # A2: все активные, не только текущая
         if request:
             await ai_set_last_request(user.id, request)
-        await _send_alive(message, reply)
+        # Финальная реплика встречи — голосом (мандат 03.07), фолбэк текст.
+        if await send_voice_reply(message, reply):
+            await log_event(user.id, "voice_reply", "close")
+        else:
+            await _send_alive(message, reply)
         await _after_close(message, user, request)
     else:
-        # H1: канал хода решён в brain_turn (диагноз ИЛИ ключевая фаза → voice, и
-        # текст уже написан как устная речь). Сбой TTS → тот же текст, ход не теряется.
-        sent_voice = False
-        if brain_medium == "voice":
-            if await send_voice_reply(message, reply, _pause_kbd()):
-                sent_voice = True
-                await log_event(user.id, "voice_reply", brain_phase)
-            else:
-                # Телеметрия отказа голоса: видно В ЧЁМ дело (длина/TTS), а не гадаем.
-                await log_event(user.id, "voice_fallback_text", f"len={len(reply)}")
-                # Ведение: вопрос текстом перед глазами. НЕ как робот (мандат Кая):
-                # формулировки ротируются, инструкция «как отвечать» — только в первых
-                # двух ходах (дальше она уже знает), без вопроса — тишина, не шаблон.
-                q = _last_question(reply)
-                if q:
-                    heads = ("Мой вопрос: «%s»", "«%s»", "Вопрос перед глазами: «%s»",
-                             "Оставлю здесь: «%s»")
-                    tail = heads[turns % len(heads)] % q
-                    if turns <= 2:
-                        tail += "\n\nОтветь текстом или голосовым 🎙"
-                    await message.answer(tail, parse_mode=None)
-                elif turns <= 1:
-                    await message.answer("Ответь, как есть — текстом или голосовым 🎙",
-                                         parse_mode=None)
-        if not sent_voice:
+        # Мандат Кая 03.07: ГОЛОС — канал КАЖДОГО хода Алёны, включая v1-фолбэк
+        # (раньше голос шёл только из мозга v2 → v1-путь сыпал текстом = «снова
+        # куча текста»). Текст — только фолбэк при сбое TTS, ход не теряется.
+        sent_voice = await send_voice_reply(message, reply, _pause_kbd())
+        if sent_voice:
+            await log_event(user.id, "voice_reply", brain_phase or "v1")
+            # Мандат Кая: «текст используем для описания вопросов» — вопрос из
+            # голосового дублируем коротким текстом перед глазами (ротация форм).
+            q = _last_question(reply)
+            if q:
+                heads = ("Мой вопрос: «%s»", "«%s»", "Вопрос перед глазами: «%s»",
+                         "Оставлю здесь: «%s»")
+                await message.answer(heads[turns % len(heads)] % q, parse_mode=None)
+        else:
+            # Телеметрия отказа голоса: видно В ЧЁМ дело (длина/TTS), а не гадаем.
+            await log_event(user.id, "voice_fallback_text", f"len={len(reply)}")
             await _send_alive(message, reply, _pause_kbd())
+            # Ведение: вопрос текстом перед глазами. НЕ как робот (мандат Кая):
+            # формулировки ротируются, инструкция «как отвечать» — только в первых
+            # двух ходах (дальше она уже знает), без вопроса — тишина, не шаблон.
+            q = _last_question(reply)
+            if not q and turns <= 1:
+                await message.answer("Ответь, как есть — текстом или голосовым 🎙",
+                                     parse_mode=None)
         # W7: чекпойнт пути на 5-м ходу — ощущение «меня ведут» (карта прогресса
         # из модели клиентки). Только в brain-пути и если есть чем наполнить.
         if turns == 5 and settings.brain_v2_enabled:
@@ -680,13 +799,21 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
                 came = (cm_now.get("facade_lie") or "").strip()
                 seen = (cm_now.get("true_request_hypothesis") or "").strip()
                 if came or seen:
-                    parts = ["🗺 Где мы уже, смотри:"]
+                    # Мандат Кая 03.07: чекпойнт — тоже её речь → голосом, фолбэк текст.
+                    spoken = "Смотри, где мы уже. "
                     if came:
-                        parts.append(f"— ты пришла с «{came[:120]}»")
+                        spoken += f"Ты пришла с «{came[:120]}». "
                     if seen:
-                        parts.append(f"— а под этим уже проступает настоящее: «{seen[:120]}»")
-                    parts.append("Осталось главное. Идём.")
-                    await message.answer("\n".join(parts), parse_mode=None)
+                        spoken += f"А под этим уже проступает настоящее: «{seen[:120]}». "
+                    spoken += "Осталось главное. Идём."
+                    if not await send_voice_reply(message, spoken):
+                        parts = ["🗺 Где мы уже, смотри:"]
+                        if came:
+                            parts.append(f"— ты пришла с «{came[:120]}»")
+                        if seen:
+                            parts.append(f"— а под этим уже проступает настоящее: «{seen[:120]}»")
+                        parts.append("Осталось главное. Идём.")
+                        await message.answer("\n".join(parts), parse_mode=None)
                     await log_event(user.id, "checkpoint_shown")
             except Exception:
                 logger.warning("checkpoint failed (continuing)", exc_info=True)
@@ -879,6 +1006,15 @@ _STALE_NUDGE_TEXT = (
     "990 в месяц, чтобы не разбираться в одиночку.\n\n— Алёна"
 )
 
+# Тот же нудж устной речью (для TTS): без переносов-подписи, «дверь ниже».
+_STALE_NUDGE_VOICE = (
+    "Ты затихла — и это нормально. Иногда то, что мы задели, нужно донести молча. "
+    "Я не тороплю и не исчезаю. Захочешь продолжить — просто напиши, я здесь. "
+    "А если почувствуешь, что не хочешь оставаться с этим одна — я рядом каждый "
+    "день в Клубе «Манифест»: без лимита наших встреч, в чате и на эфирах. "
+    "Дверь — под этим сообщением."
+)
+
 
 async def run_stale_session_tick(bot):
     """Фоновый джоб (планировщик bot.py): активные встречи, где последней была
@@ -900,9 +1036,11 @@ async def run_stale_session_tick(bot):
         await ai_mark_nudged(sid)
         try:
             # Нудж — единственное место, где кнопка Клуба ВО ВРЕМЯ встречи уместна:
-            # текст сам делает оффер (из _pause_kbd кнопку убрали, фидбек Кая 02.07).
-            await bot.send_message(tg_id, _STALE_NUDGE_TEXT,
-                                   reply_markup=_club_only_kbd(), parse_mode=None)
+            # оффер ГОЛОСОМ (мандат 03.07), фолбэк текст с той же кнопкой.
+            if not await send_voice_to(bot, tg_id, _STALE_NUDGE_VOICE,
+                                       _club_only_kbd()):
+                await bot.send_message(tg_id, _STALE_NUDGE_TEXT,
+                                       reply_markup=_club_only_kbd(), parse_mode=None)
             await log_event(tg_id, "stale_nudge")
             sent += 1
         except Exception:
@@ -943,12 +1081,13 @@ async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
     q = request.strip().rstrip(".")[:140]
     try:
         who = f"{name}, послушай" if name else "Послушай"
+        # ⚠️ Без слова «кружок» в озвучке (TTS читает «крУжком» — фидбек Кая 03.07).
         script = (f"{who}. То, что у тебя сегодня открылось — «{q}» — это "
                   "по-настоящему. И такое не разматывают в одиночку и не бросают на "
                   "полпути. Я собрала Клуб именно для этого: там я рядом без лимита, "
                   "каждую неделю живой эфир, и круг женщин, где не нужно держать "
                   "лицо. Продолжим ровно с того места, где мы остановились. "
-                  "Дверь — под этим кружком. Я тебя жду.")
+                  "Дверь — сразу под этим видео. Я тебя жду.")
         await add_circle_credits(tg_id, CIRCLE_CREDITS)  # леджер ДО рендера (антидубль)
         if await send_kruzhok_to(bot, chat_id, script):
             await log_event(tg_id, "offer_kruzhok", "sent")
@@ -958,8 +1097,13 @@ async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
             return
     except Exception:
         logger.warning("offer kruzhok failed (fallback text)", exc_info=True)
-    # Страховка: кружок не собрался → оффер текстом, кнопка обязана дойти.
+    # Страховка: кружок не собрался → оффер голосом (сбой видео ≠ сбой TTS),
+    # дальше текстом — кнопка обязана дойти в любом случае.
     try:
+        spoken = " ".join(_OFFER_FALLBACK_TEXT.replace("— Алёна", "").split())
+        if await send_voice_to(bot, chat_id, spoken, _club_only_kbd()):
+            await log_event(tg_id, "offer_kruzhok", "fallback_voice")
+            return
         await log_event(tg_id, "offer_kruzhok", "fallback_text")
         await bot.send_message(chat_id, _OFFER_FALLBACK_TEXT,
                                reply_markup=_club_only_kbd(), parse_mode=None)
@@ -974,20 +1118,25 @@ async def _after_close(message: Message, user, request: str | None = None):
     # безлимит встреч у него остаётся).
     is_member = await _is_club_member(user.id)
 
-    # Вскрылся настоящий запрос → ведём дальше. Куда именно — по сегменту:
+    # Вскрылся настоящий запрос → ведём дальше. Куда именно — по сегменту.
+    # Мандат Кая 03.07: офферы — ГОЛОСОМ (это её речь), кнопка на голосовом;
+    # сбой TTS → тот же текст с кнопкой, продажа не теряется.
     if request:
         q = request.strip().rstrip(".")
         if is_member:
             # Член Клуба → тёплый докрут в 1:1 (я тебя уже знаю).
             await log_event(user.id, "offer_shown", "bridge_1on1")
-            await message.answer(
-                f"Твой настоящий запрос — вот он:\n\n«{q}»\n\n"
-                "Я тебе его показала. Но показать — не значит прожить. Размотать это и "
-                "правда поменять — работа для живой встречи, не для переписки.\n\n"
-                "Готова взять этот запрос в работу со мной лично — вот дверь. После "
-                "оплаты откроется мой календарь: выберешь окно и придёшь именно с этим."
-                "\n\n— Алёна",
-                reply_markup=_bridge_kbd(), parse_mode=None)
+            bridge = (
+                f"Твой настоящий запрос — вот он: «{q}». Я тебе его показала. Но "
+                "показать — не значит прожить. Размотать это и правда поменять — "
+                "работа для живой встречи, не для переписки. Готова взять этот "
+                "запрос в работу со мной лично — дверь под этим сообщением. После "
+                "оплаты откроется мой календарь: выберешь окно и придёшь именно с этим.")
+            if await send_voice_reply(message, bridge, _bridge_kbd()):
+                await log_event(user.id, "voice_reply", "offer_bridge")
+            else:
+                await message.answer(bridge + "\n\n— Алёна",
+                                     reply_markup=_bridge_kbd(), parse_mode=None)
             return
         # Адаптивный порядок офферов (Кай 02.07): ГОРЯЧЕЙ (трек T4 — готова к шагу)
         # первым предлагаем ФЛАГМАН 1:1, Клуб — рядом второй строкой. Остальным —
@@ -996,14 +1145,19 @@ async def _after_close(message: Message, user, request: str | None = None):
         u_row = await get_user(user.id)
         if (u_row or {}).get("lead_track") == "T4":
             await log_event(user.id, "offer_shown", "flagship_1on1_T4")
-            await message.answer(
-                f"Твой настоящий запрос — вот он:\n\n«{q}»\n\n"
-                "Показать я показала. Но такое разматывают не в переписке. Ты готова — "
-                "я это вижу по нашему разговору. Поэтому скажу прямо: возьми этот запрос "
-                "на живую встречу со мной, 1:1 — час только про тебя, именно с этим.\n\n"
-                "Если хочешь мягче и постепенно — есть Клуб: я рядом каждый день, "
-                "безлимит наших встреч, эфиры, круг женщин с похожими историями.\n\n— Алёна",
-                reply_markup=_bridge_kbd(), parse_mode=None)
+            flagship = (
+                f"Твой настоящий запрос — вот он: «{q}». Показать я показала. Но "
+                "такое разматывают не в переписке. Ты готова — я это вижу по нашему "
+                "разговору. Поэтому скажу прямо: возьми этот запрос на живую встречу "
+                "со мной, один на один — час только про тебя, именно с этим. Если "
+                "хочешь мягче и постепенно — есть Клуб: я рядом каждый день, безлимит "
+                "наших встреч, эфиры, круг женщин с похожими историями. Обе двери — "
+                "под этим сообщением.")
+            if await send_voice_reply(message, flagship, _bridge_kbd()):
+                await log_event(user.id, "voice_reply", "offer_flagship")
+            else:
+                await message.answer(flagship + "\n\n— Алёна",
+                                     reply_markup=_bridge_kbd(), parse_mode=None)
             await _schedule_followups(user.id)
             return
         # Бесплатная встреча исчерпана → оффер Клуба = ИМЕННОЙ КРУЖОК (мандат Кая:
@@ -1011,9 +1165,10 @@ async def _after_close(message: Message, user, request: str | None = None):
         # («записываю тебе кружок») → фоновый рендер твина ~2–4 мин → кружок с именем
         # и её запросом + кнопка. Сбой рендера → страховка текстом с кнопкой.
         await log_event(user.id, "offer_shown", "club_request")
+        # ⚠️ Без слова «кружок» в озвучке (кривое ударение TTS — фидбек Кая 03.07).
         teaser = (f"Твой настоящий запрос — вот он: «{q}». Показать я показала. "
-                  "Но главное я скажу тебе не текстом. Подожди пару минут — "
-                  "записываю тебе кружок. Лично тебе.")
+                  "Но главное я скажу тебе не текстом. Дай мне пару минут — "
+                  "запишу тебе видео. Лично тебе.")
         if not await send_voice_reply(message, teaser):
             await message.answer(teaser, parse_mode=None)
         _name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
@@ -1028,10 +1183,13 @@ async def _after_close(message: Message, user, request: str | None = None):
             "На сегодня всё. Ещё разговор — просто /alena.", reply_markup=_menu_kbd())
         return
     await log_event(user.id, "offer_shown", "club_soft")
-    await message.answer(
-        "Это была твоя бесплатная встреча — одна на человека.\n\n"
-        "Если захочешь продолжить — я рядом регулярно в Клубе «Манифест»: без лимита, "
-        "в чате и на эфирах. Клуб только открылся, ты заходишь одной из первых. "
-        "990 в месяц — чтобы не быть с этим одной.",
-        reply_markup=_club_only_kbd())
+    soft = ("Это была твоя бесплатная встреча — одна на человека. Если захочешь "
+            "продолжить — я рядом регулярно в Клубе «Манифест»: без лимита, в чате "
+            "и на эфирах. Клуб только открылся, ты заходишь одной из первых. "
+            "990 в месяц — чтобы не быть с этим одной. Дверь — под этим сообщением.")
+    if await send_voice_reply(message, soft, _club_only_kbd()):
+        await log_event(user.id, "voice_reply", "offer_soft")
+    else:
+        await message.answer(soft + "\n\n— Алёна",
+                             reply_markup=_club_only_kbd(), parse_mode=None)
     await _schedule_followups(user.id)
