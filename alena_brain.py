@@ -190,12 +190,13 @@ async def respond(directive: str, method_phase: str, name, archetype,
     system = build_response_prompt(name, archetype, directive, method_phase,
                                    voice_mode, profile)
     messages = _to_claude_messages(history)
-    # Голосовой ход — ЖЁСТКИЙ потолок токенов: промпт просит ≤400 знаков, но
-    # модель заносит → длинный текст раньше ронял TTS-гейт и уходил текстом
-    # (фидбек Кая «снова куча текста»). 500 токенов ≈ 900-1200 зн — потолок физикой.
+    # Голосовой ход: промпт целит 550–750 знаков (30–40 сек — тайминг Кая 03.07),
+    # потолок токенов страхует от простыни (500 ток ≈ 900-1200 зн — TTS-гейт цел).
+    # temperature УБРАН: Anthropic задепрекейтил (400 на каждом вызове = обрыв
+    # воронки 03.07 19:12) — работаем на дефолте модели.
     return await _call_claude(
         settings.brain_respond_model, system, messages,
-        max_tokens=(500 if voice_mode else 1500), temperature=0.9, timeout=60)
+        max_tokens=(500 if voice_mode else 1500), timeout=60)
 
 
 async def brain_turn(history: list[dict], name, archetype,

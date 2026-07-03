@@ -622,10 +622,19 @@ async def _generate(history: list[dict], name, povorot, archetype,
 
 
 def _last_question(text: str) -> str | None:
-    """Последний вопрос из реплики (для текст-дублёра после голосового)."""
+    """Последний вопрос из реплики (для текст-дублёра после голосового).
+
+    Фидбек Кая 03.07: эхо стало огрызком — короткий финальный вопрос («А телу
+    как?») без предыдущей вопрос-фразы теряет смысл → склеиваем два последних."""
     qs = [s.strip() for s in re.findall(r"[^.!?…\n]*\?", text or "")]
-    qs = [q for q in qs if 6 <= len(q) <= 160]
-    return qs[-1] if qs else None
+    qs = [q for q in qs if 6 <= len(q) <= 200]
+    if not qs:
+        return None
+    if len(qs) >= 2 and len(qs[-1]) < 45:
+        pair = f"{qs[-2]} {qs[-1]}"
+        if len(pair) <= 220:
+            return pair
+    return qs[-1]
 
 
 # ── «Живое присутствие»: индикатор печати + паузы + разбивка на реплики ───────
@@ -798,6 +807,13 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
                 reply = await _generate(history, user.first_name, povorot, archetype, force_close, dossier)
             except Exception as e:
                 logger.exception(f"alena talk failed for {user.id}: {e}")
+                # Телеметрия ДВОЙНОГО отказа (мозг + v1): обрыв 03.07 19:12 был
+                # немым — в D1 не оставалось следа, что Gemini тоже лёг.
+                try:
+                    await log_event(user.id, "v1_fail",
+                                    f"{type(e).__name__}: {str(e)[:120]}")
+                except Exception:
+                    pass
                 await message.answer(
                     "Я тут — но прямо сейчас ответить не получается. "
                     "Попробуй чуть позже или напиши @kydaidy.",
