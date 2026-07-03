@@ -27,7 +27,8 @@ from config import settings
 from database import init_db
 from handlers import router
 from manifest7_guide import guide_router
-from alena_chat import alena_router, run_stale_session_tick, run_orphan_turn_tick
+from alena_chat import (alena_router, run_stale_session_tick,
+                        run_orphan_turn_tick, run_club_ladder_tick)
 from heygen_credits import run_credit_check
 from curator import curator_router, push_daily_batch, publish_tick
 from growth_agent import growth_router, run_growth_tick
@@ -134,6 +135,9 @@ async def main():
     # T-1 (03.07): само-восстановление хода, убитого редеплоем (реплика клиентки
     # без ответа >3 мин) — доотвечаем сами, тишина себя чинит.
     scheduler.add_job(run_orphan_turn_tick, "interval", minutes=2, args=[bot])
+    # Спящая лестница 1:1 (совещание 03.07): члену Клуба ≥14 дней — разовое
+    # приглашение на живой разбор. При 0 членов — no-op.
+    scheduler.add_job(run_club_ladder_tick, "interval", hours=24, args=[bot])
     # Волна 1 (H6/H7): дожим после оффера — серия из 3 касаний (45м/24ч/72ч).
     # Оплатившие отфильтровываются в самом запросе; no-op при FOLLOWUP_ENABLED=0.
     scheduler.add_job(

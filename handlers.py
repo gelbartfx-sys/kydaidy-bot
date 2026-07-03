@@ -333,6 +333,11 @@ async def _send_shadow_kruzhok(message: Message, code: str) -> bool:
     fid = _KRUZHOK_FILE_IDS.get(code)
     if not fid:
         return False
+    # Квота 2 кружков на клиента (мандат Кая 03.07): исчерпана → путь без видео
+    # (опенер сам исполнит «личное про Тень» тизером).
+    from alena_voice import video_quota_ok
+    if not await video_quota_ok(message.chat.id):
+        return False
     try:
         await message.bot.send_chat_action(message.chat.id, "record_video_note")
         await message.answer_video_note(fid)

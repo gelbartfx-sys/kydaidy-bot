@@ -32,10 +32,56 @@ _SPEECH_URL = "https://api.heygen.com/v3/voices/speech"
 VOICE_MIN_CHARS = 40
 VOICE_MAX_CHARS = 1600
 
+# Экономика касаний (мандат Кая 03.07): на клиента — до 12 голосовых и до 2
+# видео-кружков; текст безлимитен. Голос остаётся дефолтом ДО исчерпания квоты.
+VOICE_CAP_PER_CLIENT = 12
+VIDEO_NOTES_CAP_PER_CLIENT = 2
+
 
 def voice_fits(text: str) -> bool:
     t = (text or "").strip()
     return VOICE_MIN_CHARS <= len(t) <= VOICE_MAX_CHARS
+
+
+def _quota_exempt(chat_id: int) -> bool:
+    """Whitelist-тестеры (Кай и др.) — вне квот. Late import: без цикла."""
+    try:
+        from handlers import SHADOW_UNLIMITED_IDS
+        return chat_id in SHADOW_UNLIMITED_IDS
+    except Exception:
+        return False
+
+
+async def voice_quota_ok(chat_id: int) -> bool:
+    """True — голос ещё можно; False — квота 12 исчерпана, вызывающий шлёт текст.
+    Крэш-сейф: сомнение трактуем в пользу голоса (регламент канала важнее квоты)."""
+    if _quota_exempt(chat_id):
+        return True
+    try:
+        from database import events_count_total
+        return (await events_count_total(chat_id, ("voice_sent",))) < VOICE_CAP_PER_CLIENT
+    except Exception:
+        return True
+
+
+async def video_quota_ok(chat_id: int) -> bool:
+    """True — кружок ещё можно (лимит 2: кружок Тени + именной оффер)."""
+    if _quota_exempt(chat_id):
+        return True
+    try:
+        from database import events_count_total
+        return (await events_count_total(
+            chat_id, ("kruzhok_sent", "video_note_sent"))) < VIDEO_NOTES_CAP_PER_CLIENT
+    except Exception:
+        return True
+
+
+async def _mark_voice_sent(chat_id: int, text: str):
+    try:
+        from database import log_event
+        await log_event(chat_id, "voice_sent", str(len(text)))
+    except Exception:
+        pass
 
 
 async def tts_bytes(text: str) -> bytes | None:
@@ -114,13 +160,21 @@ async def render_kruzhok(text: str, timeout_min: int = 7) -> bytes | None:
 
 
 async def send_kruzhok_to(bot, chat_id: int, text: str) -> bool:
-    """Отрендерить и отправить именной кружок. True — ушёл."""
+    """Отрендерить и отправить именной кружок. True — ушёл.
+    Гейт квоты — ДО рендера (кредиты HeyGen не тратим на исчерпавшего лимит)."""
+    if not await video_quota_ok(chat_id):
+        return False  # квота 2 кружков исчерпана → вызывающий шлёт голос/текст
     data = await render_kruzhok(text)
     if not data:
         return False
     try:
         await bot.send_chat_action(chat_id, "record_video_note")
         await bot.send_video_note(chat_id, BufferedInputFile(data, filename="alena.mp4"))
+        try:
+            from database import log_event
+            await log_event(chat_id, "video_note_sent", "offer")
+        except Exception:
+            pass
         return True
     except Exception:
         logger.warning("send_video_note failed", exc_info=True)
@@ -132,6 +186,8 @@ async def send_voice_to(bot, chat_id: int, text: str, reply_markup=None) -> bool
     True — ушло голосом; False — вызывающий шлёт текст."""
     if not settings.voice_replies_enabled or not voice_fits(text):
         return False
+    if not await voice_quota_ok(chat_id):
+        return False  # квота 12 голосовых исчерпана → вызывающий шлёт текст
     try:
         await bot.send_chat_action(chat_id, "record_voice")
     except Exception:
@@ -142,6 +198,7 @@ async def send_voice_to(bot, chat_id: int, text: str, reply_markup=None) -> bool
     try:
         await bot.send_voice(chat_id, BufferedInputFile(audio, filename="alena.mp3"),
                              reply_markup=reply_markup)
+        await _mark_voice_sent(chat_id, text)
         return True
     except Exception:
         logger.warning("send_voice_to failed (fallback to text)", exc_info=True)
@@ -156,6 +213,8 @@ async def send_voice_reply(message, text: str, reply_markup=None) -> bool:
     """
     if not settings.voice_replies_enabled or not voice_fits(text):
         return False
+    if not await voice_quota_ok(message.chat.id):
+        return False  # квота 12 голосовых исчерпана → вызывающий шлёт текст
     try:
         await message.bot.send_chat_action(message.chat.id, "record_voice")
     except Exception:
@@ -167,6 +226,7 @@ async def send_voice_reply(message, text: str, reply_markup=None) -> bool:
         await message.answer_voice(
             BufferedInputFile(audio, filename="alena.mp3"),
             reply_markup=reply_markup)
+        await _mark_voice_sent(message.chat.id, text)
         return True
     except Exception:
         logger.warning("send_voice failed (fallback to text)", exc_info=True)

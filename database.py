@@ -782,6 +782,33 @@ async def events_count_recent(tg_id: int, event: str, hours: int = 48) -> int:
         return 0
 
 
+async def events_count_total(tg_id: int, events: tuple) -> int:
+    """Событий за ВСЁ время (квоты касаний, мандат Кая 03.07). Крэш-сейф → 0."""
+    try:
+        marks = ",".join("?" * len(events))
+        row = await _exec(
+            f"SELECT COUNT(*) AS n FROM funnel_events WHERE tg_id = ? AND event IN ({marks})",
+            (tg_id, *events), fetch="one")
+        return int((row or {}).get("n") or 0)
+    except Exception:
+        return 0
+
+
+async def club_ladder_candidates(min_days: int = 14, limit: int = 10):
+    """Члены Клуба ≥N дней — для спящей лестницы 1:1 (совещание 03.07).
+    Крэш-сейф → []."""
+    try:
+        return await _exec(
+            "SELECT tg_id FROM subscriptions WHERE product_code = 'manifest_club' "
+            "AND active = 1 "
+            f"AND datetime(started_at) < datetime('now', '-{int(min_days)} days') "
+            f"LIMIT {int(limit)}",
+            fetch="all") or []
+    except Exception:
+        logger.warning("club_ladder_candidates failed (degraded)", exc_info=True)
+        return []
+
+
 async def ai_open_session(tg_id: int):
     """Создаёт активную встречу и возвращает её строку (с id).
 

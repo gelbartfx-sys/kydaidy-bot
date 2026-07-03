@@ -37,7 +37,7 @@ from database import (
     ai_stale_sessions, ai_orphan_sessions, ai_mark_nudged, save_lead_signals, set_lead_track,
     get_client_model, save_client_model,
     log_event, followup_schedule, get_lead_signals, add_circle_credits,
-    ai_last_session, events_count_recent,
+    ai_last_session, events_count_recent, club_ladder_candidates,
 )
 from alena_voice import send_voice_reply, send_voice_to, send_kruzhok_to
 from lead_policy import should_spend_circle, CIRCLE_CREDITS
@@ -53,6 +53,16 @@ alena_router = Router()
 
 FREE_SESSIONS = 1          # бесплатных встреч на человека (пожизненно)
 CLUB_MONTHLY_SESSIONS = 2  # встреч с AI-Алёной в месяц для членов Клуба (мандат Кая 03.07)
+
+# Волна 1:1 (совещание 03.07): маркеры намерения клиентки, НЕ зависят от мозга v2.
+# Границы слов — чтобы «отлично» не читалось как «лично».
+_DEPTH_RE = re.compile(
+    r"\b(глубже|вглубь|лично|личн(ая|ую) встреч\w*|один на один|сесси[юия]|"
+    r"консультаци\w*|поработать с тобой|вживую|невыносимо|не справляюсь)\b", re.I)
+_HOT_RE = re.compile(
+    r"(сколько (это )?стоит|как (записаться|оплатить|купить)|куда платить|"
+    r"запиши меня|хочу записаться|готова (платить|начать|записаться)|оплачу)", re.I)
+
 TURN_CAP = 12              # предохранитель: после стольких реплик — мягкое закрытие
                            # (20→12 по прогону Кая 03.07: v1 жевал по кругу)
 HISTORY_LIMIT = 40         # сколько сообщений истории отдаём модели
@@ -696,6 +706,16 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
         await message.answer(CRISIS_REPLY, parse_mode=None, reply_markup=_pause_kbd())
         return
 
+    # Волна 1:1 (совещание 03.07): keyword-детекторы намерения (крэш-сейф).
+    # hot → на закрытии флагман 1:1 первым; depth → дверь «глубже и лично».
+    try:
+        if _HOT_RE.search(text):
+            await log_event(user.id, "lead_hot_kw", text[:60])
+        elif _DEPTH_RE.search(text):
+            await log_event(user.id, "depth_intent", text[:60])
+    except Exception:
+        logger.warning("intent detector failed (continuing)", exc_info=True)
+
     await ai_bump_turns(sid)
 
     # Устойчивость к смерти ключа: текстовый ответ может дать мозг v2 (Anthropic) ИЛИ
@@ -1113,6 +1133,33 @@ _STALE_NUDGE_VOICE = (
 # Render-редеплой убивает контейнер посреди генерации (15–40с): реплика клиентки
 # записана, ответа Алёны нет — тишина (вскрыто прогоном Кая 03.07 12:00).
 # Тик находит такие встречи и доотвечает сам.
+_LADDER_TEXT = (
+    "Мы рядом уже пару недель. Если чувствуешь, что какая-то тема просится "
+    "глубже, чем чат и эфиры, — есть живой разбор один на один: час только "
+    "про тебя. Мест — всего восемь в месяц. Дверь — под этим сообщением."
+)
+
+
+async def run_club_ladder_tick(bot):
+    """Спящая лестница 1:1 (совещание 03.07): члену Клуба ≥14 дней — один раз
+    мягкое приглашение на живой разбор. При 0 членов — no-op. Крэш-сейф."""
+    try:
+        for row in await club_ladder_candidates(min_days=14):
+            tg = row["tg_id"]
+            if await events_count_recent(tg, "ladder_1on1", hours=24 * 365):
+                continue  # уже звали — не повторяем
+            try:
+                if not await send_voice_to(bot, tg, _LADDER_TEXT, _one_on_one_kbd()):
+                    await bot.send_message(tg, _LADDER_TEXT + "\n\n— Алёна",
+                                           reply_markup=_one_on_one_kbd(),
+                                           parse_mode=None)
+                await log_event(tg, "ladder_1on1", "sent")
+            except Exception:
+                logger.warning("ladder send failed for %s", tg, exc_info=True)
+    except Exception:
+        logger.warning("club ladder tick failed", exc_info=True)
+
+
 async def run_orphan_turn_tick(bot):
     rows = await ai_orphan_sessions(minutes=3)
     healed = 0
@@ -1272,9 +1319,10 @@ async def _after_close(message: Message, user, request: str | None = None):
             bridge = (
                 f"«{q}» — вот с чем ты пришла на самом деле. Увидеть — уже "
                 "много, но не всё: прожить и поменять такое в переписке не "
-                "выходит. Это работа для живой встречи, один на один. Готова — "
-                "дверь под этим сообщением: после оплаты откроется мой "
-                "календарь, выберешь окно — и продолжим ровно с этого места.")
+                "выходит. Это работа для живой встречи, один на один. Живых "
+                "мест у меня всего восемь в месяц. Готова — дверь под этим "
+                "сообщением: после оплаты откроется мой календарь, выберешь "
+                "окно — и продолжим ровно с этого места.")
             if await send_voice_reply(message, bridge, _bridge_kbd()):
                 await log_event(user.id, "voice_reply", "offer_bridge")
             else:
@@ -1286,19 +1334,41 @@ async def _after_close(message: Message, user, request: str | None = None):
         # Клуб (трипваер). Рынок: AI слабо закрывает высокий чек холодным, поэтому
         # 1:1-первым только по скорингу готовности.
         u_row = await get_user(user.id)
-        if (u_row or {}).get("lead_track") == "T4":
-            await log_event(user.id, "offer_shown", "flagship_1on1_T4")
+        # Совещание 1:1 (03.07): T4-ветка больше НЕ зависит от мозга — keyword-
+        # фолбэк готовности (lead_hot_kw) включает флагман и при лежащем скоринге.
+        hot_kw = (await events_count_recent(user.id, "lead_hot_kw", 48)) > 0
+        if (u_row or {}).get("lead_track") == "T4" or hot_kw:
+            await log_event(user.id, "offer_shown",
+                            "flagship_1on1_kw" if hot_kw else "flagship_1on1_T4")
             flagship = (
                 f"«{q}» — с этим не в переписку. Ты готова — я это вижу. Скажу "
                 "прямо: возьми этот запрос на живую встречу со мной, один на "
-                "один — час только про тебя, именно с ним. А хочешь мягче и "
-                "постепенно — есть Клуб: две встречи со мной в месяц, утренние аудио, живые эфиры, круг "
-                "женщин с похожими историями. Обе "
-                "двери — под этим сообщением.")
+                "один — час только про тебя, именно с ним. Живых мест — всего "
+                "восемь в месяц. А хочешь мягче и постепенно — есть Клуб: две "
+                "встречи со мной здесь, утренние аудио, живые эфиры, круг "
+                "женщин с похожими историями. Обе двери — под этим сообщением.")
             if await send_voice_reply(message, flagship, _bridge_kbd()):
                 await log_event(user.id, "voice_reply", "offer_flagship")
             else:
                 await message.answer(flagship + "\n\n— Алёна",
+                                     reply_markup=_bridge_kbd(), parse_mode=None)
+            await _schedule_followups(user.id)
+            return
+        # Совещание 1:1 (03.07), pull-триггер: она САМА просила «глубже/лично» в
+        # сессии (depth_intent) → дверь 1:1 + Клуб мягкой альтернативой. Дефолт
+        # для остальных не трогаем (один Клуб-CTA на пике).
+        if (await events_count_recent(user.id, "depth_intent", 48)) > 0:
+            await log_event(user.id, "offer_shown", "depth_1on1")
+            depth = (
+                f"«{q}» — и ты сама сказала: хочется глубже и лично. Услышала. "
+                "Такое я веду на живой встрече, один на один — час только про "
+                "тебя, именно с этим. Живых мест у меня всего восемь в месяц. "
+                "А мягче и постепенно — Клуб: две встречи со мной здесь, "
+                "утренние аудио, эфиры. Обе двери — под этим сообщением.")
+            if await send_voice_reply(message, depth, _bridge_kbd()):
+                await log_event(user.id, "voice_reply", "offer_depth")
+            else:
+                await message.answer(depth + "\n\n— Алёна",
                                      reply_markup=_bridge_kbd(), parse_mode=None)
             await _schedule_followups(user.id)
             return
