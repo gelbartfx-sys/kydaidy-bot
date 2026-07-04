@@ -41,6 +41,22 @@ def _club_kbd() -> InlineKeyboardMarkup:
     ])
 
 
+# Экологичный триггер подписки на канал (мандат Кая 04.07): один раз, после
+# оффера — в касании-45м, отдельным ТЕКСТОМ после голосового (не тратит квоту
+# голосовых и не давит). Ништяк — бесплатные утренние аудио в самом канале.
+_CHANNEL_NUDGE = (
+    "И ещё. Каждое утро я выхожу в канале — короткий голос, бесплатно, "
+    "для всех. Загляни:"
+)
+
+
+def _channel_kbd() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌿 Канал Алёны — @kydaidy",
+                              url="https://t.me/kydaidy")],
+    ])
+
+
 def _archetype_name(u: dict | None) -> str | None:
     try:
         dist = (u or {}).get("shadow_dist")
@@ -121,6 +137,13 @@ async def run_followup_tick(bot) -> int:
                 if not await send_voice_to(bot, tg_id, text, _club_kbd()):
                     await bot.send_message(tg_id, text + "\n\n— Алёна",
                                            reply_markup=_club_kbd(), parse_mode=None)
+                try:
+                    await bot.send_message(tg_id, _CHANNEL_NUDGE,
+                                           reply_markup=_channel_kbd(),
+                                           parse_mode=None)
+                    await log_event(tg_id, "channel_nudge")
+                except Exception:
+                    logger.warning("channel nudge failed", exc_info=True)
             elif stage == 2:
                 # Мандат Кая 03.07: все касания Алёны — голосом, фолбэк текст.
                 if not await send_voice_to(bot, tg_id, _spoken(_TOUCH2_TEXT), _club_kbd()):

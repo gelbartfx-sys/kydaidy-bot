@@ -79,6 +79,20 @@ async def _is_club_member(tg_id: int) -> bool:
     return await get_active_subscription(tg_id, "manifest_club") is not None
 
 
+async def _memory_allowed(tg_id: int) -> bool:
+    """Досье прошлых встреч подаётся мозгу ТОЛЬКО купившим (мандат Кая 04.07):
+    бесплатная тест-встреча — с чистого листа (память приплетала прошлые
+    прогоны), после покупки (Клуб или разовая, напр. 1:1) — память работает.
+    Крэш-сейф: сомнение = без памяти (безопаснее галлюцинаций)."""
+    try:
+        if await _is_club_member(tg_id):
+            return True
+        from database import get_user_purchases
+        return bool(await get_user_purchases(tg_id))
+    except Exception:
+        return False
+
+
 async def _remaining(user) -> int | None:
     """Сколько встреч осталось; None — безлимит (только whitelist).
 
@@ -755,7 +769,10 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
             mix = " · ".join(
                 f"{ARCHETYPES[c]['name']} {n * 10}%" for c, n in top if n > 0)
             profile = f"смесь Теней из теста: {mix}"
-    if dossier:
+    # Мандат Кая 04.07: память между встречами — ТОЛЬКО купившим. Бесплатная
+    # тест-встреча всегда с чистого листа (память приплетала прошлые прогоны);
+    # пришла через покупку (Клуб/1:1) — досье работает.
+    if dossier and await _memory_allowed(user.id):
         profile = f"{profile + '. ' if profile else ''}досье прошлых встреч: {dossier[:600]}"
 
     turns = (sess.get("turns") or 0) + 1
@@ -1233,7 +1250,7 @@ async def run_orphan_turn_tick(bot):
                 counts = decode_distribution(shadow)
                 if counts:
                     archetype = ARCHETYPES[winner_from_counts(counts)]
-            if (u or {}).get("dossier"):
+            if (u or {}).get("dossier") and await _memory_allowed(tg_id):
                 profile = f"досье прошлых встреч: {(u or {}).get('dossier')[:600]}"
             name = None  # имени из Message тут нет; мозг ведёт без обращения
             reply, new_cm, signals, track = await brain_turn(
