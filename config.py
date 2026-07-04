@@ -35,6 +35,30 @@ class Settings(BaseSettings):
     # морфологии, ~$0.01/ход — приемлемо).
     brain_respond_model: str = "claude-sonnet-5"
 
+    # ── Каскад мозга — провайдер-агностичные аналоги (критичный рефактор 04.07) ──
+    # diagnose/respond идут по фиксированному списку сверху вниз, переходя к
+    # следующему слою при отказе (см. brain_cascade.py). Anthropic-alt переживает
+    # деприкейт/400 конкретной модели (кейс «temperature 400» 03.07) — тот же
+    # провайдер, другая модель. Gemini — другой провайдер, под ЕДИНЫМ контрактом
+    # (build_diagnose_prompt/build_response_prompt), больше не слабый SESSION_ARC.
+    brain_diagnose_model_alt: str = "claude-sonnet-5"
+    brain_respond_model_alt: str = "claude-haiku-4-5"
+    # OpenAI/Groq/Mistral — «слоты»: тихо пропускаются, пока не задан свой ключ
+    # (активация — самим ключом в env, SDK импортируется лениво). Groq/Mistral —
+    # ОДИН слот в каскаде: Groq первым, если оба ключа заданы.
+    openai_api_key: str = ""
+    brain_openai_model: str = "gpt-4o-mini"
+    groq_api_key: str = ""
+    brain_groq_model: str = "llama-3.3-70b-versatile"
+    mistral_api_key: str = ""
+    brain_mistral_model: str = "mistral-large-latest"
+    # Тест неубиваемости воронки (мандат Кая): форс-выключить слои каскада, напр.
+    # BRAIN_DISABLE=anthropic,gemini — прогнать «упали все верхние» и убедиться,
+    # что дальше по списку (openai/groq/mistral/static) встреча не рвётся.
+    # Имена слоёв: anthropic|gemini|openai|groq|mistral. static выключить нельзя —
+    # это последний рубеж (без сети, никогда не падает).
+    brain_disable: str = ""
+
     # ── Голос Алёны в диалоге (Волна 1: H1/H3, присутствие) ───────────────────
     # Ключевые ходы встречи приходят ГОЛОСОВЫМИ: диагноз мозга решает medium=voice
     # (эмоц. пик / сдвиг), оффер Клуба — всегда голосом. TTS = HeyGen v3

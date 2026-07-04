@@ -93,6 +93,21 @@ async def _memory_allowed(tg_id: int) -> bool:
         return False
 
 
+async def _gate_dossier(tg_id: int, dossier: str | None) -> str | None:
+    """ЕДИНЫЙ чекпойнт памяти (критичный рефактор 04.07): досье прошлых встреч
+    попадает в ЛЮБОЙ system-промпт (brain-путь через profile, ЛЕГАСИ v1-путь
+    build_system/_generate, джобы orphan-tick) ТОЛЬКО через эту функцию.
+
+    Раньше _generate() (v1/build_system/SESSION_ARC — без ANTI_HALLUCINATION)
+    получал СЫРОЙ dossier мимо _memory_allowed(): один тест-аккаунт подмешивал
+    досье прошлых бесплатных прогонов → «я помню, ты сказала…» о несказанном
+    (корень галлюцинаций, аудит 04.07). Гейтуй dossier ЗДЕСЬ, один раз, сразу
+    после чтения из users — и передавай результат везде ниже по потоку."""
+    if not dossier:
+        return None
+    return dossier if await _memory_allowed(tg_id) else None
+
+
 async def _remaining(user) -> int | None:
     """Сколько встреч осталось; None — безлимит (только whitelist).
 
@@ -756,7 +771,13 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
     u = await get_user(user.id)
     povorot = (u or {}).get("povorot")
     shadow = (u or {}).get("shadow_dist")
-    dossier = (u or {}).get("dossier")
+    # Мандат Кая 04.07: память между встречами — ТОЛЬКО купившим. Бесплатная
+    # тест-встреча всегда с чистого листа (память приплетала прошлые прогоны);
+    # пришла через покупку (Клуб/1:1) — досье работает. ЕДИНЫЙ чекпойнт (_gate_dossier)
+    # — гейтуем ЗДЕСЬ, один раз: `dossier` ниже по потоку уже безопасен ВЕЗДЕ,
+    # включая легаси v1-путь (_generate/build_system), который раньше получал
+    # СЫРОЕ досье мимо гейта (корень галлюцинаций, аудит 04.07).
+    dossier = await _gate_dossier(user.id, (u or {}).get("dossier"))
     archetype = None
     profile = None   # индивидуальная карта для мозга: ПОЛНОЕ распределение + досье
     if shadow:
@@ -769,10 +790,7 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
             mix = " · ".join(
                 f"{ARCHETYPES[c]['name']} {n * 10}%" for c, n in top if n > 0)
             profile = f"смесь Теней из теста: {mix}"
-    # Мандат Кая 04.07: память между встречами — ТОЛЬКО купившим. Бесплатная
-    # тест-встреча всегда с чистого листа (память приплетала прошлые прогоны);
-    # пришла через покупку (Клуб/1:1) — досье работает.
-    if dossier and await _memory_allowed(user.id):
+    if dossier:
         profile = f"{profile + '. ' if profile else ''}досье прошлых встреч: {dossier[:600]}"
 
     turns = (sess.get("turns") or 0) + 1
@@ -811,7 +829,7 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
                     r"[а-яА-ЯёЁ]", user.first_name or "") else None
                 reply, new_cm, brain_signals, brain_track = await brain_turn(
                     history, spoken_name, archetype, cm, profile,
-                    fresh=(turns <= 1), force_voice=by_voice)
+                    fresh=(turns <= 1), force_voice=by_voice, tg_id=user.id)
                 await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
                 brain_phase = (new_cm or {}).get("method_phase")
                 brain_medium = (new_cm or {}).get("medium")
@@ -1148,7 +1166,7 @@ async def on_after_offer(message: Message):
             "слова, не общими фразами. 4) Оставь выбор за ней без нажима и "
             "позови спросить ещё, если что-то осталось. Не оправдывайся, не "
             "дави, без цен и ссылок. Лещ честности, не уговоры.",
-            "native_offer", name, archetype, history, voice_mode=True)
+            "native_offer", name, archetype, history, voice_mode=True, tg_id=user.id)
         reply, _ = extract_request(reply)
         reply = strip_dangling_markers(reply.replace(CLOSE_MARK, "")).strip()
     except Exception:
@@ -1250,12 +1268,14 @@ async def run_orphan_turn_tick(bot):
                 counts = decode_distribution(shadow)
                 if counts:
                     archetype = ARCHETYPES[winner_from_counts(counts)]
-            if (u or {}).get("dossier") and await _memory_allowed(tg_id):
-                profile = f"досье прошлых встреч: {(u or {}).get('dossier')[:600]}"
+            # ЕДИНЫЙ чекпойнт памяти (_gate_dossier) — та же гарантия, что и в _talk.
+            gated_dossier = await _gate_dossier(tg_id, (u or {}).get("dossier"))
+            if gated_dossier:
+                profile = f"досье прошлых встреч: {gated_dossier[:600]}"
             name = None  # имени из Message тут нет; мозг ведёт без обращения
             reply, new_cm, signals, track = await brain_turn(
                 history, name, archetype, await get_client_model(tg_id),
-                profile, fresh=False)
+                profile, fresh=False, tg_id=tg_id)
             await save_client_model(tg_id, json.dumps(new_cm, ensure_ascii=False))
             reply = strip_dangling_markers(
                 extract_score(extract_dossier(extract_request(
@@ -1398,7 +1418,8 @@ async def _after_close(message: Message, user, request: str | None = None):
                 f"«{q}» — вот с чем ты пришла на самом деле. Увидеть — уже "
                 "много, но не всё: прожить и поменять такое в переписке не "
                 "выходит. Это работа для живой встречи, один на один. Живых "
-                "мест у меня всего восемь в месяц. Готова — дверь под этим "
+                "мест у меня всего восемь в месяц. Если что-то ещё держит — "
+                "просто напиши мне, отвечу как есть. Готова — дверь под этим "
                 "сообщением: после оплаты откроется мой календарь, выберешь "
                 "окно — и продолжим ровно с этого места.")
             if await send_voice_reply(message, bridge, _bridge_kbd()):

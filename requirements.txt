@@ -8,3 +8,7 @@ pydantic-settings==2.6.0
 Pillow==11.0.0
 tzdata==2026.1
 anthropic==0.115.0
+# Каскад мозга (brain_cascade.py): OpenAI/Groq/Mistral-слоты — OpenAI-совместимый
+# клиент используется для всех трёх (base_url меняется). Ленивый импорт: не нужен,
+# пока не задан свой ключ в env (OPENAI_API_KEY/GROQ_API_KEY/MISTRAL_API_KEY).
+openai==1.54.4

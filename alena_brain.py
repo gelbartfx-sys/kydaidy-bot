@@ -1,28 +1,35 @@
-"""AI-Алёна «мозг v2» (Фаза 1 ядра) — 2-проход: ДИАГНОЗ → ОТВЕТ. На Claude.
+"""AI-Алёна «мозг v2» (Фаза 1 ядра) — 2-проход: ДИАГНОЗ → ОТВЕТ.
 
 Из рефлекс-ответчика (1 вызов/ход) → в мыслящий агент:
-  • ПРОХОД 1 — ДИАГНОЗ (Claude Opus 4.8, adaptive thinking). Вход компактный
-    (модель клиентки + ~6 последних реплик). Выход — строгий JSON: обновлённая
-    модель клиентки + скоринг + фаза метода + директива хода. Человек его НЕ видит.
-  • ПРОХОД 2 — ОТВЕТ (Claude Haiku 4.5, голос Алёны). Исполняет директиву её голосом.
+  • ПРОХОД 1 — ДИАГНОЗ (adaptive thinking). Вход компактный (модель клиентки +
+    ~6 последних реплик). Выход — строгий JSON: обновлённая модель клиентки +
+    скоринг + фаза метода + директива хода. Человек его НЕ видит.
+  • ПРОХОД 2 — ОТВЕТ (голос Алёны). Исполняет директиву её голосом.
 
-Почему Claude, а не Gemini: gemini-2.5-pro упирался в квоту (429). Мозг Гермеса
-переведён на Anthropic SDK (решение Кая). Честно: скилы/плагины Claude Code сюда
-НЕ переносятся — это чистые вызовы модели; инструменты дал бы Claude Agent SDK.
+Критичный рефактор 04.07 (мандат Кая: «воронка не ломается НИ ПРИ КАКИХ
+обстоятельствах»): оба прохода больше НЕ завязаны на один провайдер — каждый
+идёт через provider-агностичный каскад (brain_cascade.run_cascade): Anthropic
+(основная + запасная модель) → Gemini → OpenAI/Groq/Mistral-слоты → безопасный
+статичный слой (без сети, никогда не падает). ВСЕ сетевые слои используют ОДИН
+и тот же сильный system-контракт (build_diagnose_prompt/build_response_prompt,
+с ANTI_HALLUCINATION) — раньше фолбэк на Gemini шёл по слабому SESSION_ARC без
+защит, это и было корнем галлюцинаций/перепрыжки. Подробности каскада,
+ретраев и телеметрии — см. brain_cascade.py.
 
-Всё крэш-сейф: сбой диагноза/парса/сети/ключа → безопасный дефолт-директива,
-встреча не падает. Подключается в alena_chat._talk ТОЛЬКО за флагом
-settings.brain_v2_enabled. См. docs/hermes/ai-coach-architecture.md.
+Всё крэш-сейф: diagnose()/respond() НИКОГДА не бросают исключение — на полном
+отказе всех сетевых слоёв возвращают безопасный статичный дефолт. Подключается
+в alena_chat._talk ТОЛЬКО за флагом settings.brain_v2_enabled.
+См. docs/hermes/ai-coach-architecture.md.
 """
 
 from __future__ import annotations
 
 import logging
 
-from config import settings
+import brain_cascade
 from alena_persona import (
     build_diagnose_prompt, build_response_prompt, parse_diagnose_json,
-    METHOD_PHASES,
+    static_safe_reply, METHOD_PHASES,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,20 +46,6 @@ _SAFE_DIRECTIVE = {
     "medium": "text",
     "track": "T2",
 }
-
-# Ленивый общий async-клиент. Читает ANTHROPIC_API_KEY из окружения (Render env).
-# Строим при первом вызове; и сам пакет anthropic импортируем лениво — чтобы импорт
-# модуля не падал там, где пакета/ключа нет (локальные офлайн-тесты, флаг OFF).
-# Любой сбой импорта/конструктора ловится в вызывающих try → фолбэк на v1.
-_client = None
-
-
-def _get_client():
-    global _client
-    if _client is None:
-        import anthropic  # ленивый импорт: на Render пакет есть, локально не нужен
-        _client = anthropic.AsyncAnthropic()  # ANTHROPIC_API_KEY из env
-    return _client
 
 
 def _default_diagnosis() -> dict:
@@ -86,77 +79,28 @@ def score_to_signals(score: dict | None) -> dict:
     return out
 
 
-def _to_claude_messages(history: list[dict]) -> list[dict]:
-    """История бота (role 'model'/'user') → messages для Claude.
-
-    Claude требует: роли user/assistant, первая — user, соседние одной роли
-    склеиваем. Пустые реплики выкидываем. Ведущие assistant-реплики (Алёна
-    открыла встречу) отбрасываем, пока не встретим первую user-реплику."""
-    msgs: list[dict] = []
-    for m in (history or []):
-        text = (m.get("content") or "").strip()
-        if not text:
-            continue
-        role = "assistant" if m.get("role") == "model" else "user"
-        if not msgs and role == "assistant":
-            continue  # первым сообщением к Claude должен идти user
-        if msgs and msgs[-1]["role"] == role:
-            msgs[-1]["content"] += "\n\n" + text  # склеить соседей одной роли
-        else:
-            msgs.append({"role": role, "content": text})
-    return msgs
-
-
-def _extract_text(message) -> str:
-    """Текст из ответа Claude: конкатенация text-блоков (thinking-блоки пропускаем)."""
-    return "".join(
-        b.text for b in message.content
-        if getattr(b, "type", None) == "text"
-    ).strip()
-
-
-async def _call_claude(model: str, system: str, messages: list[dict], *,
-                       max_tokens: int, thinking: dict | None = None,
-                       temperature: float | None = None,
-                       timeout: float = 90.0) -> str:
-    """Один вызов Claude messages.create → текст. Может бросить (ловит вызывающий)."""
-    if not messages:
-        raise RuntimeError("claude: пустая история")
-    kwargs = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": messages,
-    }
-    if thinking is not None:
-        kwargs["thinking"] = thinking          # temperature с thinking не задаём
-    elif temperature is not None:
-        kwargs["temperature"] = temperature
-    message = await _get_client().messages.create(
-        **kwargs, timeout=timeout)
-    text = _extract_text(message)
-    if not text:
-        raise RuntimeError(f"claude {model} пустой ответ")
-    return text
-
-
 async def diagnose(history: list[dict], name, archetype,
                    client_model: dict | None, profile: str | None = None,
-                   fresh: bool = False) -> dict:
-    """ПРОХОД 1 — диагноз (Opus 4.8, adaptive thinking). → dict модели/директивы.
+                   fresh: bool = False, tg_id: int | None = None) -> dict:
+    """ПРОХОД 1 — диагноз (adaptive thinking). → dict модели/директивы.
 
     profile — индивидуальная карта из теста (полное распределение Теней + досье):
     комбинации у всех разные, диагноз работает от её конкретной смеси.
     fresh=True — первый ход НОВОЙ сессии: модель клиентки трактуется как память
     прошлых встреч, метод-петля стартует заново (не смешиваем контексты сессий).
-    Крэш-сейф: любой сбой (сеть/ключ/парс/пустой ответ) → безопасный дефолт."""
+    tg_id — только для телеметрии каскада (brain_layer/brain_failover в D1);
+    None — телеметрия молча пропускается (напр. вызов без известного юзера).
+    Крэш-сейф: любой сбой (сеть/ключ/парс/пустой ответ, ВСЕ слои каскада) →
+    безопасный дефолт — diagnose() НИКОГДА не бросает."""
     try:
         system = build_diagnose_prompt(name, archetype, client_model, profile, fresh)
-        messages = _to_claude_messages((history or [])[-DIAGNOSE_HISTORY:])
-        raw = await _call_claude(
-            settings.brain_diagnose_model, system, messages,
-            max_tokens=3000, thinking={"type": "adaptive"})
-        data = parse_diagnose_json(raw)
+        data = await brain_cascade.run_cascade(
+            "diagnose", system, (history or [])[-DIAGNOSE_HISTORY:],
+            layer_kwargs={"max_tokens": 3000, "timeout": 90.0},
+            validate=parse_diagnose_json,
+            safe_default_factory=_default_diagnosis,
+            tg_id=tg_id,
+        )
     except Exception:
         logger.warning("brain diagnose failed (safe default)", exc_info=True)
         return _default_diagnosis()
@@ -181,38 +125,56 @@ async def diagnose(history: list[dict], name, archetype,
 
 async def respond(directive: str, method_phase: str, name, archetype,
                   history: list[dict], voice_mode: bool = False,
-                  profile: str | None = None) -> str:
-    """ПРОХОД 2 — ответ голосом Алёны (Haiku 4.5), исполняет директиву.
+                  profile: str | None = None, tg_id: int | None = None) -> str:
+    """ПРОХОД 2 — ответ голосом Алёны, исполняет директиву.
 
     voice_mode=True → ответ будет озвучен: промпт требует устную речь (коротко,
     без письменных конструкций, без тавтологии).
-    profile — её анкета (смесь Теней + досье): Алёна опирается на неё ЯВНО."""
-    system = build_response_prompt(name, archetype, directive, method_phase,
-                                   voice_mode, profile)
-    messages = _to_claude_messages(history)
+    profile — её анкета (смесь Теней + досье): Алёна опирается на неё ЯВНО.
+    tg_id — телеметрия каскада (см. diagnose()). Крэш-сейф: respond() НИКОГДА
+    не бросает — на полном отказе всех сетевых слоёв отдаёт статичный
+    безопасный ход по фазе метода (alena_persona.static_safe_reply)."""
+    try:
+        system = build_response_prompt(name, archetype, directive, method_phase,
+                                       voice_mode, profile)
+    except Exception:
+        logger.warning("build_response_prompt failed (static safe reply)", exc_info=True)
+        return static_safe_reply(method_phase)
     # Голосовой ход: промпт целит 550–750 знаков (30–40 сек — тайминг Кая 03.07),
     # потолок токенов страхует от простыни (500 ток ≈ 900-1200 зн — TTS-гейт цел).
-    # temperature УБРАН: Anthropic задепрекейтил (400 на каждом вызове = обрыв
-    # воронки 03.07 19:12) — работаем на дефолте модели.
-    return await _call_claude(
-        settings.brain_respond_model, system, messages,
-        max_tokens=(500 if voice_mode else 1500), timeout=60)
+    # temperature НЕ задаём (Anthropic задепрекейтил параметр — 400 на каждом
+    # вызове = обрыв воронки 03.07 19:12) — работаем на дефолте модели.
+    try:
+        return await brain_cascade.run_cascade(
+            "respond", system, history,
+            layer_kwargs={"max_tokens": (500 if voice_mode else 1500), "timeout": 60.0},
+            validate=lambda raw: ((raw or "").strip() or None),
+            safe_default_factory=lambda: static_safe_reply(method_phase),
+            tg_id=tg_id,
+        )
+    except Exception:
+        # Недостижимо на практике (run_cascade сама не бросает) — страховка типов.
+        logger.error("brain cascade respond: неожиданный сбой (static safe reply)",
+                    exc_info=True)
+        return static_safe_reply(method_phase)
 
 
 async def brain_turn(history: list[dict], name, archetype,
                      client_model: dict | None,
                      profile: str | None = None,
                      fresh: bool = False,
-                     force_voice: bool = False) -> tuple[str, dict, dict, str | None]:
+                     force_voice: bool = False,
+                     tg_id: int | None = None) -> tuple[str, dict, dict, str | None]:
     """Полный ход мозга v2: диагноз → ответ.
 
     → (reply Алёны, обновлённая модель клиентки, сигналы лида {heat,open,resist,value},
        трек 'T1'..'T4'|None).
     Скоринг диагноза (score) РАНЬШЕ выбрасывался — теперь отдаём наверх, чтобы _talk
     записал lead-сигналы и трек (без этого закрытие на Клуб шло без топлива, а /sources
-    был слеп к 🔥). diagnose() крэш-сейф внутри. respond() может бросить — тогда бросаем
-    наверх, вызывающий (_talk) фолбэчит на v1-путь в том же ходе."""
-    dx = await diagnose(history, name, archetype, client_model, profile, fresh)
+    был слеп к 🔥). diagnose() и respond() крэш-сейф внутри (провайдер-агностичный
+    каскад, см. brain_cascade.py) — brain_turn() НИКОГДА не бросает исключение.
+    tg_id — телеметрия каскада (brain_layer/brain_failover в funnel_events)."""
+    dx = await diagnose(history, name, archetype, client_model, profile, fresh, tg_id=tg_id)
     # Канал хода решается ЗДЕСЬ (единая точка): голос — если диагноз попросил ИЛИ
     # фаза = истинный запрос/сдвиг (эмоц. пик по определению). Ответ тогда пишется
     # как устная речь, и _talk шлёт его голосовым (cm["medium"]).
@@ -223,7 +185,7 @@ async def brain_turn(history: list[dict], name, archetype,
     _ = force_voice  # сохранён в сигнатуре: зеркало канала теперь покрыто дефолтом
     reply = await respond(dx.get("directive"), dx.get("method_phase"),
                           name, archetype, history, voice_mode=voice_out,
-                          profile=profile)
+                          profile=profile, tg_id=tg_id)
 
     # Собираем модель клиентки для сохранения: обновление от диагноза + служебка.
     cm = dict(client_model) if isinstance(client_model, dict) else {}
