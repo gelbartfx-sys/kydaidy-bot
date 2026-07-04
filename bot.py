@@ -16,10 +16,10 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher, BaseMiddleware
+from aiogram import Bot, Dispatcher, BaseMiddleware, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import Update
+from aiogram.types import Update, Message
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -88,6 +88,27 @@ class DMInspectMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+
+_ADMIN_IDS = {6271776494, 680319075}  # Кай, Алёна
+
+
+async def _admin_chat_id(message: Message):
+    """Служебный (только админы): переслать сообщение из канала/чата → бот вернёт chat_id.
+    Зарегистрирован НА dp (проверяется раньше всех роутеров). Безопасно: чужих не трогает."""
+    try:
+        origin = getattr(message, "forward_origin", None)
+        chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
+        if chat is None:
+            chat = getattr(message, "forward_from_chat", None)
+        if chat is not None:
+            title = getattr(chat, "title", "") or getattr(chat, "username", "") or ""
+            await message.reply(f"chat_id: {chat.id}\n{title}")
+        else:
+            await message.reply("Переслано из скрытого источника — chat_id недоступен.")
+    except Exception:
+        logging.exception("admin chat_id handler failed")
+
+
 async def main():
     await init_db()
 
@@ -96,6 +117,8 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
     )
     dp = Dispatcher()
+    # Служебный админ-хэндлер (chat_id из форварда) — на dp, раньше всех роутеров.
+    dp.message.register(_admin_chat_id, F.forward_origin, F.from_user.id.in_(_ADMIN_IDS))
     dp.update.outer_middleware(DMInspectMiddleware())
     # curator_router ПЕРВЫМ: текст-фильтр режима правки (только когда куратор
     # awaiting='edit') должен перехватить сообщение Алёны раньше AI-встречи и catch-all.
