@@ -7,6 +7,7 @@ import hmac
 import hashlib
 import logging
 import json
+from datetime import datetime
 
 from aiohttp import web
 from aiogram import Bot
@@ -14,7 +15,7 @@ from aiogram import Bot
 from urllib.parse import quote
 
 from config import settings
-from database import upsert_user, add_purchase, add_subscription, get_user
+from database import upsert_user, add_purchase, add_subscription, get_user, set_oneonone
 from handlers import _send_povorot_result
 
 logger = logging.getLogger(__name__)
@@ -116,11 +117,21 @@ def _tribute_product_code(event: str, payload: dict) -> str | None:
     if event in _TRIBUTE_SUB_EVENTS or event in _TRIBUTE_CANCEL_EVENTS:
         ch = payload.get("channel_id")
         try:
-            if ch is not None and settings.manifest_club_channel_id and int(ch) == settings.manifest_club_channel_id:
-                return "manifest_club"
+            ch_int = int(ch) if ch is not None else None
         except (TypeError, ValueError):
-            pass
-        return "manifest_club"  # сейчас единственная подписка
+            ch_int = None
+        # Подписочный 1:1 (мандат 04.07) — отдельный закрытый канал.
+        if ch_int is not None and settings.manifest_1on1_channel_id \
+                and ch_int == settings.manifest_1on1_channel_id:
+            return "manifest_1on1"
+        if ch_int is not None and settings.manifest_club_channel_id \
+                and ch_int == settings.manifest_club_channel_id:
+            return "manifest_club"
+        # Фолбэк по имени/цене, если channel_id не пришёл (различаем 1:1 и Клуб).
+        name = str(payload.get("subscription_name") or payload.get("product_name") or "").lower()
+        if any(k in name for k in ("1:1", "1 на 1", "1on1", "встреч", "сесс")):
+            return "manifest_1on1"
+        return "manifest_club"  # дефолтная подписка
     if event in _TRIBUTE_DIGITAL_EVENTS:
         name = str(payload.get("product_name") or payload.get("digital_product_name")
                    or payload.get("subscription_name") or "").lower()
@@ -182,6 +193,31 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         # (покрывает и подписки: там payment_id = subscription_id). Метка ставится
         # ПОСЛЕ успешного гранта — сбой до гранта корректно переиграется ретраем.
         from database import get_meta, set_meta
+
+        # ── Подписочный 1:1: сброс счётчика встреч на полный тариф ─────────────
+        # Делаем ДО общего гейта, т.к. общий дедуп по subscription_id мог бы
+        # заблокировать помесячный сброс (id подписки стабилен между периодами).
+        # Дедуп сброса — период-зависимый (по дате окончания/оплаты периода):
+        #   • ретрай ОДНОГО вебхука не восстановит уже потраченную встречу;
+        #   • реальное продление следующего периода гарантированно сбросит счётчик.
+        # Тариф определяем по сумме: ≈18000 → 3 встречи, иначе → 1 встреча.
+        if code == "manifest_1on1" and event in _TRIBUTE_SUB_EVENTS:
+            tariff = 3 if amount >= int(settings.one_on_one_3x_price * 0.9) else 1
+            # Период для дедупа сброса. Если Tribute не прислал ни одной date-метки
+            # — падаем на месячный бакет (YYYY-MM): ретрай в том же месяце дедупится,
+            # а реальное продление в новом месяце ГАРАНТИРОВАННО сбросит счётчик
+            # (иначе оплаченный клиент со 2-го месяца молча заперт).
+            period = str(payload.get("expires_at") or payload.get("period_id")
+                         or payload.get("paid_at") or payload.get("created_at")
+                         or datetime.now().strftime("%Y-%m"))
+            reset_key = f"1on1reset_{payment_id}_{period}" if payment_id else ""
+            if not reset_key or not await get_meta(reset_key):
+                await set_oneonone(tg_id, tariff, tariff)
+                if reset_key:
+                    await set_meta(reset_key, "1")
+                logger.info("Tribute 1:1: счётчик сброшен tg=%s тариф=%s встреч",
+                            tg_id, tariff)
+
         _dedup_key = f"pay_{event}_{payment_id}" if payment_id else ""
         if _dedup_key and await get_meta(_dedup_key):
             logger.info("Tribute: дубль вебхука %s (payment_id=%s) — уже выдано, скип",
@@ -213,6 +249,7 @@ _CHANNEL_BY_PRODUCT = {
     "manifest_7": "manifest_7_channel_id",
     "manifest_club": "manifest_club_channel_id",
     "manifest_plus": "manifest_plus_channel_id",
+    "manifest_1on1": "manifest_1on1_channel_id",
 }
 
 _BASE_TEXTS = {
@@ -236,9 +273,12 @@ _BASE_TEXTS = {
         "Я свяжусь с тобой лично в течение 1–2 дней — для приветственного звонка."
     ),
     "manifest_1on1": (
-        "✅ Запись на «Манифест 1:1» оплачена.\n\n"
-        "Теперь выбери удобное окно в моём календаре и подтверди запись — там же "
-        "напиши тему запроса и пару деталей, чтобы я пришла к встрече готовой."
+        "✅ Подписка на личные встречи оформлена — я держу для тебя место в "
+        "расписании.\n\n"
+        "Как записаться: нажми /zapis прямо здесь, в этом чате. Я покажу, "
+        "сколько встреч осталось у тебя в этом месяце по тарифу, и дам ссылку "
+        "на мой календарь — выберешь удобное время. В начале следующего месяца "
+        "счётчик снова полный."
     ),
 }
 
@@ -313,13 +353,9 @@ async def _grant_access(bot: Bot, tg_id: int, product_code: str):
             logger.warning(f"channel_id not configured for {product_code} — sending text only")
             text += "\n\n_Сейчас Алёна свяжется с тобой лично._"
 
-    # 1:1 → ссылка на календарь с окнами (+ префилл темы запроса со встречи).
-    if product_code == "manifest_1on1":
-        cal = await _calendly_link_for(tg_id)
-        if cal:
-            text += f"\n\n🗓 Календарь Алёны — выбери окно:\n{cal}"
-        else:
-            text += "\n\n_Календарь скоро открою — Алёна свяжется с тобой лично для записи._"
+    # 1:1 — подписочный: запись идёт через /zapis (счётчик встреч гейтит доступ
+    # к календарю), поэтому прямую ссылку тут НЕ даём — только напоминаем команду.
+    # (текст про /zapis уже в _BASE_TEXTS["manifest_1on1"].)
 
     text += "\n\n— Алёна"
 

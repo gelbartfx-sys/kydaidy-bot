@@ -345,6 +345,18 @@ _RUNTIME_MIGRATIONS = (
         sent_at TIMESTAMP,
         status TEXT DEFAULT 'due'
     )""",
+    # ── Подписочный 1:1 (мандат Кая 04.07): продаём личные встречи ПОДПИСКОЙ
+    # (тариф 1 встреча/мес = sZXq, 3 встречи/мес = sZXr), а не разовым продуктом.
+    # Счётчик встреч гейтит запись: невозможно записаться сверх тарифа. Оплата/
+    # продление Tribute (newSubscription/renewedSubscription) СБРАСЫВАЕТ счётчик
+    # на полный тариф (новый период). sessions_left уменьшается при записи в боте.
+    """CREATE TABLE IF NOT EXISTS oneonone_subs (
+        tg_id INTEGER PRIMARY KEY,
+        tariff INTEGER,
+        sessions_left INTEGER,
+        period_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
 )
 
 
@@ -475,6 +487,56 @@ async def set_meta(key: str, value: str) -> None:
             (key, value))
     except Exception:
         logger.warning("set_meta failed (continuing)", exc_info=True)
+
+
+# ── Подписочный 1:1: счётчик встреч в текущем периоде ─────────────────────────
+# Крэш-сейф: ошибка (миграция не докатилась) деградирует ТОЛЬКО фичу записи 1:1,
+# не роняя воронку/оплаты.
+async def set_oneonone(tg_id: int, tariff: int, sessions_left: int) -> None:
+    """Установить/сбросить счётчик 1:1 (при оплате и продлении — полный тариф).
+    upsert: обновляет tariff+sessions_left и стартует новый период."""
+    try:
+        await _exec(
+            "INSERT INTO oneonone_subs (tg_id, tariff, sessions_left, "
+            "period_start, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, "
+            "CURRENT_TIMESTAMP) ON CONFLICT(tg_id) DO UPDATE SET "
+            "tariff = excluded.tariff, sessions_left = excluded.sessions_left, "
+            "period_start = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP",
+            (tg_id, tariff, sessions_left))
+    except Exception:
+        logger.warning("set_oneonone failed (continuing)", exc_info=True)
+
+
+async def get_oneonone(tg_id: int) -> dict | None:
+    """Запись счётчика 1:1 → {tariff, sessions_left, period_start} | None."""
+    try:
+        return await _exec(
+            "SELECT tariff, sessions_left, period_start FROM oneonone_subs "
+            "WHERE tg_id = ?", (tg_id,), fetch="one")
+    except Exception:
+        logger.warning("get_oneonone failed (continuing)", exc_info=True)
+        return None
+
+
+async def dec_oneonone(tg_id: int) -> bool:
+    """Списать 1 встречу, ТОЛЬКО если осталось > 0.
+    True — списано (можно давать ссылку на календарь); False — нечего списывать
+    (сверх тарифа / нет подписки) или ошибка. WHERE sessions_left>0 в UPDATE —
+    защита БД от ухода в минус даже при гонке; предчтение даёт корректный ответ."""
+    try:
+        row = await _exec(
+            "SELECT sessions_left FROM oneonone_subs WHERE tg_id = ?",
+            (tg_id,), fetch="one")
+        if not row or int(row.get("sessions_left") or 0) <= 0:
+            return False
+        await _exec(
+            "UPDATE oneonone_subs SET sessions_left = sessions_left - 1, "
+            "updated_at = CURRENT_TIMESTAMP WHERE tg_id = ? AND sessions_left > 0",
+            (tg_id,))
+        return True
+    except Exception:
+        logger.warning("dec_oneonone failed (continuing)", exc_info=True)
+        return False
 
 
 # ── Скоринг лида (Фаза 1): сигналы собеседника + леджер кредитов ──────────────

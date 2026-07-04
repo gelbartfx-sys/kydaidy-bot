@@ -30,6 +30,7 @@ from manifest7_guide import guide_router
 from alena_chat import (alena_router, run_stale_session_tick,
                         run_orphan_turn_tick, run_club_ladder_tick)
 from heygen_credits import run_credit_check
+from booking import book_router
 from curator import curator_router, push_daily_batch, publish_tick
 from growth_agent import growth_router, run_growth_tick
 from followup import run_followup_tick
@@ -128,6 +129,9 @@ async def main():
     dp.include_router(curator_router)
     dp.include_router(alena_router)
     dp.include_router(guide_router)
+    # book_router: /zapis + callback'и записи 1:1 — раньше главного router,
+    # чтобы команду записи не перехватил catch-all fallback.
+    dp.include_router(book_router)
     # growth_router — только callback-кнопки ревью реактивации (без текст-фильтров,
     # конфликтов с catch-all не создаёт). После основного router тоже ок.
     dp.include_router(growth_router)

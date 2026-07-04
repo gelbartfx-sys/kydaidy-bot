@@ -97,7 +97,8 @@ class Settings(BaseSettings):
     manifest_7_price: int = 1990
     manifest_club_price: int = 990
     manifest_plus_price: int = 4990
-    one_on_one_price: int = 7000
+    one_on_one_price: int = 7000        # тариф «1 встреча/мес» (подписка sZXq)
+    one_on_one_3x_price: int = 18000    # тариф «3 встречи/мес» (подписка sZXr)
 
     # Публичный календарь Алёны для записи на 1:1 (Calendly). Окна видны на странице;
     # тему запроса префиллим через ?a1=... (первый кастомный вопрос формы).
@@ -108,6 +109,7 @@ class Settings(BaseSettings):
     manifest_7_channel_id: int = 0
     manifest_club_channel_id: int = -1003798652811  # Клуб «Манифест» (closed channel)
     manifest_plus_channel_id: int = 0
+    manifest_1on1_channel_id: int = -1003110346484  # «Манифест · 1:1» (closed channel)
 
     # ── Контент-конвейер (курирование Алёной) ────────────────────────────────
     # Numeric Telegram id Алёны-куратора. Бот не может писать по @username —

@@ -241,6 +241,15 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
     user = message.from_user
     args, source = _split_source(args)
 
+    # Запись на 1:1 из канала «Манифест · 1:1» (кнопка ?start=book1on1).
+    # Регистрируем юзера и сразу ведём в поток записи (проверка счётчика встреч).
+    if args == "book1on1":
+        await upsert_user(user.id, user.username, user.first_name)
+        await set_user_source(user.id, source)
+        from booking import start_booking
+        await start_booking(message)
+        return
+
     # Тест тёмных архетипов с полным распределением: /start s_<10 символов>.
     if args.startswith("s_"):
         if decode_distribution(args[2:]):
