@@ -38,6 +38,7 @@ from database import (
     get_client_model, save_client_model,
     log_event, followup_schedule, get_lead_signals, add_circle_credits,
     ai_last_session, events_count_recent, club_ladder_candidates,
+    memory_allowed as _db_memory_allowed,
 )
 from alena_voice import send_voice_reply, send_voice_to, send_kruzhok_to
 from lead_policy import should_spend_circle, CIRCLE_CREDITS
@@ -83,14 +84,12 @@ async def _memory_allowed(tg_id: int) -> bool:
     """Досье прошлых встреч подаётся мозгу ТОЛЬКО купившим (мандат Кая 04.07):
     бесплатная тест-встреча — с чистого листа (память приплетала прошлые
     прогоны), после покупки (Клуб или разовая, напр. 1:1) — память работает.
-    Крэш-сейф: сомнение = без памяти (безопаснее галлюцинаций)."""
-    try:
-        if await _is_club_member(tg_id):
-            return True
-        from database import get_user_purchases
-        return bool(await get_user_purchases(tg_id))
-    except Exception:
-        return False
+    Крэш-сейф: сомнение = без памяти (безопаснее галлюцинаций).
+
+    Делегирует в database.memory_allowed — ЕДИНЫЙ гейт, переиспользуемый
+    и в growth_agent (реактивация), чтобы обе точки чтения dossier сверяли
+    один и тот же реальный статус покупки, а не имя сегмента/маршрут."""
+    return await _db_memory_allowed(tg_id)
 
 
 async def _gate_dossier(tg_id: int, dossier: str | None) -> str | None:

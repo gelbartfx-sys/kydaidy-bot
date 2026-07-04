@@ -16,6 +16,7 @@ from alena_persona import parse_diagnose_json, METHOD_PHASES, static_safe_reply
 from alena_brain import _default_diagnosis, score_to_signals
 from lead_policy import classify
 import brain_cascade
+import growth_agent
 from config import settings
 
 _VALID = '{"client_model":{"pattern":"избегает близости"},"score":{"ж":1,"о":2,"с":1,"ц":2},"method_phase":"contact","directive":"признай чувство","medium":"text","track":"T2"}'
@@ -170,6 +171,61 @@ def test_cascade_all_network_layers_disabled_falls_to_static():
     asyncio.run(_run())
 
 
+async def _async_true():
+    return True
+
+
+async def _async_false():
+    return False
+
+
+def test_growth_context_dossier_requires_memory():
+    """growth_agent._context: dossier попадает в промпт ТОЛЬКО при memory_ok=True
+    (гейт по реальному статусу покупки, не по имени сегмента) — находка аудита
+    04.07: alena_no_buy = НЕ купившие, но был в auto-send без гейта памяти."""
+    user = {"tg_id": 1, "first_name": "Аня", "dossier": "приносила тревогу про мать"}
+    blocked = growth_agent._context(user, "alena_no_buy", memory_ok=False)
+    assert "ДОСЬЕ" not in blocked, "memory_ok=False → без досье"
+    assert "приносила тревогу про мать" not in blocked
+    allowed = growth_agent._context(user, "alena_no_buy", memory_ok=True)
+    assert "ДОСЬЕ" in allowed and "приносила тревогу про мать" in allowed, \
+        "memory_ok=True (купившая) → досье в промпте"
+    # без dossier вообще у юзера — оба варианта одинаково чисты
+    user2 = {"tg_id": 2}
+    assert "ДОСЬЕ" not in growth_agent._context(user2, "alena_no_buy", memory_ok=True)
+
+
+def test_growth_make_draft_gates_dossier_by_real_purchase_status():
+    """_make_draft_text вызывает database.memory_allowed(tg_id) и гейтует dossier
+    ПЕРЕД генерацией — даже для auto-send сегмента alena_no_buy не купившая
+    получает чистый лист, купившая — досье (мандат «чистый лист для не купивших»)."""
+    async def _run():
+        captured = {}
+
+        async def fake_gen(text, **kw):
+            captured["text"] = text
+            return "черновик"
+
+        orig_gen, orig_memory = growth_agent._gen, growth_agent.memory_allowed
+        growth_agent._gen = fake_gen
+        try:
+            user = {"tg_id": 111, "first_name": "Ира", "dossier": "рассказывала про развод"}
+
+            growth_agent.memory_allowed = lambda tg_id: _async_false()
+            await growth_agent._make_draft_text(user, "alena_no_buy")
+            assert "рассказывала про развод" not in captured["text"], \
+                "не купившей (нет клуба, нет покупок) — dossier НЕ должен попасть в промпт"
+
+            growth_agent.memory_allowed = lambda tg_id: _async_true()
+            await growth_agent._make_draft_text(user, "alena_no_buy")
+            assert "рассказывала про развод" in captured["text"], \
+                "купившей — dossier должен попасть в промпт"
+        finally:
+            growth_agent._gen = orig_gen
+            growth_agent.memory_allowed = orig_memory
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
     test_valid()
     test_wrapped()
@@ -181,5 +237,8 @@ if __name__ == "__main__":
     test_cascade_retry_then_failover()
     test_cascade_optional_slots_silent_skip()
     test_cascade_all_network_layers_disabled_falls_to_static()
+    test_growth_context_dossier_requires_memory()
+    test_growth_make_draft_gates_dossier_by_real_purchase_status()
     print("OK: parse_diagnose_json + safe default + score_to_signals→lead track wire + "
-         "brain_cascade (retry/failover/static/BRAIN_DISABLE)")
+         "brain_cascade (retry/failover/static/BRAIN_DISABLE) + "
+         "growth_agent dossier memory gate")

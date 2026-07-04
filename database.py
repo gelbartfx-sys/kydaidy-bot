@@ -675,6 +675,22 @@ async def get_active_subscription(tg_id: int, product_code: str):
         (tg_id, product_code), fetch="one")
 
 
+async def memory_allowed(tg_id: int) -> bool:
+    """ЕДИНЫЙ гейт памяти (мандат Кая 04.07, «чистый лист для не купивших»):
+    досье прошлых встреч можно подавать модели ТОЛЬКО купившим — член Клуба
+    «Манифест» ИЛИ есть хотя бы одна покупка (напр. разовая 1:1).
+    Бесплатным/не купившим — с чистого листа (иначе модель «помнит»
+    несказанное — корень галлюцинаций, аудит 04.07).
+    Крэш-сейф: любая ошибка проверки = память ЗАПРЕЩЕНА (безопаснее, чем
+    рискнуть галлюцинацией)."""
+    try:
+        if await get_active_subscription(tg_id, "manifest_club"):
+            return True
+        return bool(await get_user_purchases(tg_id))
+    except Exception:
+        return False
+
+
 # ── AI-проводник «Манифест 7» (прогресс практик) ─────────────────────────────
 
 async def guide_get_all(tg_id: int):

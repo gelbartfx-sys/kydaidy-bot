@@ -36,6 +36,7 @@ from ai_quiz import BASE, TEXT_MODEL
 from database import (
     growth_candidates, growth_add_draft, growth_get_draft, growth_set_status,
     growth_update_draft, mark_reactivated, growth_counts, get_user,
+    memory_allowed,
 )
 
 try:
@@ -131,7 +132,11 @@ def _archetype_name(user: dict) -> str | None:
         return None
 
 
-def _context(user: dict, segment: str) -> str:
+def _context(user: dict, segment: str, memory_ok: bool) -> str:
+    """memory_ok — ЕДИНЫЙ гейт памяти (database.memory_allowed), проверенный
+    ДО вызова этой функции по РЕАЛЬНОМУ статусу покупки (не по имени сегмента):
+    dossier попадает в промпт только если True. Мандат Кая 04.07 «чистый лист
+    для не купивших» — тот же корень, что и в alena_chat._gate_dossier."""
     seg = SEGMENTS[segment]
     bits = [f"СЕГМЕНТ: {seg['label']}.", f"ЦЕЛЬ СООБЩЕНИЯ: {seg['goal']}"]
     name = user.get("first_name")
@@ -143,7 +148,7 @@ def _context(user: dict, segment: str) -> str:
     req = user.get("last_ai_request")
     if req:
         bits.append(f"Запрос, вскрытый на встрече: «{req}». Бережно обопрись на него.")
-    dossier = user.get("dossier")
+    dossier = user.get("dossier") if memory_ok else None
     if dossier:
         bits.append(
             f"ДОСЬЕ (что ты уже знаешь о ней с прошлых встреч): {dossier}. "
@@ -154,7 +159,9 @@ def _context(user: dict, segment: str) -> str:
 
 
 async def _make_draft_text(user: dict, segment: str) -> str:
-    return await _gen(_context(user, segment))
+    # Крэш-сейф внутри memory_allowed(): ошибка проверки → False (без досье).
+    memory_ok = await memory_allowed(user["tg_id"])
+    return await _gen(_context(user, segment, memory_ok))
 
 
 # ── Карточка ревью для Кая ────────────────────────────────────────────────────
@@ -348,8 +355,9 @@ async def cb_variant(callback: CallbackQuery):
         await callback.answer("Нет ключа Gemini", show_alert=True); return
     await callback.answer("🔁 Генерю вариант…")
     user = await get_user(draft["tg_id"]) or {"tg_id": draft["tg_id"]}
+    memory_ok = await memory_allowed(user["tg_id"])
     try:
-        text = await _gen(_context(user, draft["segment"]), temperature=1.0)
+        text = await _gen(_context(user, draft["segment"], memory_ok), temperature=1.0)
     except Exception:
         logger.exception("growth variant gen failed")
         await callback.message.answer(
