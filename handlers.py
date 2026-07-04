@@ -137,6 +137,20 @@ def _split_source(args: str) -> tuple[str, str | None]:
 logger = logging.getLogger(__name__)
 router = Router()
 
+# --- Служебный: переслать сообщение из канала → бот вернёт chat_id.
+# Только админы (Кай/Алёна). Нужно для привязки закрытых каналов Клуба/1:1.
+# Безопасно: чужие форварды сюда не попадают (фильтр по id админов).
+@router.message(F.forward_origin, F.from_user.id.in_({6271776494, 680319075}))
+async def _admin_forward_chat_id(message: Message):
+    origin = message.forward_origin
+    chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
+    if chat is not None:
+        title = getattr(chat, "title", "") or getattr(chat, "username", "") or ""
+        await message.reply(f"chat_id: {chat.id}\n{title}")
+    else:
+        await message.reply("Переслано из скрытого источника — chat_id недоступен.")
+
+
 # tg_id -> строка-распределение (10 символов), по которой ждём фото для профиля Тени.
 # In-memory: генерация идёт сразу после фото в той же сессии; переживать рестарт
 # Render free не требуется (если потеряется — бот мягко попросит пройти тест заново).

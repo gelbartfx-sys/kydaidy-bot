@@ -67,7 +67,7 @@ _HOT_RE = re.compile(
 TURN_CAP = 12              # предохранитель: после стольких реплик — мягкое закрытие
                            # (20→12 по прогону Кая 03.07: v1 жевал по кругу)
 HISTORY_LIMIT = 40         # сколько сообщений истории отдаём модели
-ONE_ON_ONE_URL = "https://web.tribute.tg/p/vKG"
+ONE_ON_ONE_URL = "https://t.me/tribute/app?startapp=sZXq"  # 1:1 подписка (1 встреча/мес, entry); 3 встречи = sZXr
 CLUB_URL = "https://t.me/tribute/app?startapp=sULY"
 
 
