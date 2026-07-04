@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import tempfile
 
 import aiohttp
 from aiogram.types import BufferedInputFile
@@ -110,6 +112,107 @@ async def tts_bytes(text: str) -> bytes | None:
         return None
 
 
+# ── ffmpeg-слой (04.07, фидбек Кая): волна у голосовых + темп 1.1 + честный кружок ──
+# Telegram рисует осциллограмму ТОЛЬКО у voice в OGG/Opus — HeyGen отдаёт MP3,
+# поэтому часть клиентов показывала плоскую полоску. Перекодируем каждый голосовой
+# в OGG/Opus (заодно atempo из settings.voice_tempo). Любой сбой/нет ffmpeg →
+# шлём исходный MP3 как раньше: слой — усилитель, не точка отказа.
+
+_FFMPEG_MISSING_REPORTED = False  # телеметрия ffmpeg_missing — один раз за процесс
+
+async def _run_ffmpeg(cmd: list[str], stdin_data: bytes | None = None,
+                      timeout: int = 90) -> bytes | None:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await asyncio.wait_for(proc.communicate(stdin_data), timeout=timeout)
+        if proc.returncode != 0:
+            logger.warning("ffmpeg rc=%s: %s", proc.returncode,
+                           (err or b"")[-300:].decode(errors="replace"))
+            return None
+        return out
+    except Exception:
+        logger.warning("ffmpeg недоступен/упал (шлём исходник)", exc_info=True)
+        global _FFMPEG_MISSING_REPORTED
+        if not _FFMPEG_MISSING_REPORTED:
+            _FFMPEG_MISSING_REPORTED = True
+            try:
+                from database import log_event
+                await log_event(0, "ffmpeg_missing", cmd[0])
+            except Exception:
+                pass
+        return None
+
+
+async def _to_voice_ogg(mp3: bytes) -> bytes | None:
+    """MP3 → OGG/Opus моно 48к с темпом voice_tempo. None → вызывающий шлёт MP3."""
+    tempo = float(getattr(settings, "voice_tempo", 1.0) or 1.0)
+    af = f"atempo={tempo:.2f}" if abs(tempo - 1.0) >= 0.01 else "anull"
+    out = await _run_ffmpeg(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+         "-af", af, "-c:a", "libopus", "-b:a", "48k", "-ar", "48000", "-ac", "1",
+         "-f", "ogg", "pipe:1"], stdin_data=mp3)
+    return out or None
+
+
+async def _voice_file(text_audio: bytes) -> BufferedInputFile:
+    ogg = await _to_voice_ogg(text_audio)
+    if ogg:
+        return BufferedInputFile(ogg, filename="alena.ogg")
+    return BufferedInputFile(text_audio, filename="alena.mp3")
+
+
+async def _probe_duration(path: str) -> int | None:
+    out = await _run_ffmpeg(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path])
+    try:
+        return max(1, int(float((out or b"").decode().strip())))
+    except Exception:
+        return None
+
+
+async def _to_video_note(mp4: bytes) -> tuple[bytes, int, int | None]:
+    """Рендер твина → честный video_note: 640×640, faststart, темп voice_tempo
+    (видео+звук вместе — синхрон губ сохраняется, заодно короче пинг-понг похода
+    аватара). Возвращает (байты, length, duration|None); сбой → исходник 720."""
+    tempo = float(getattr(settings, "voice_tempo", 1.0) or 1.0)
+    src = dst = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(mp4)
+            src = f.name
+        dst = src.replace(".mp4", "_vn.mp4")
+        if abs(tempo - 1.0) >= 0.01:
+            fc = (f"[0:v]setpts=PTS/{tempo:.2f},scale=640:640[v];"
+                  f"[0:a]atempo={tempo:.2f}[a]")
+        else:
+            fc = "[0:v]scale=640:640[v];[0:a]anull[a]"
+        ok = await _run_ffmpeg(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src,
+             "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+             "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", dst],
+            timeout=240)
+        if ok is None or not os.path.exists(dst) or os.path.getsize(dst) == 0:
+            return mp4, 720, None
+        dur = await _probe_duration(dst)
+        with open(dst, "rb") as f:
+            return f.read(), 640, dur
+    except Exception:
+        logger.warning("video_note transcode failed (шлём исходник)", exc_info=True)
+        return mp4, 720, None
+    finally:
+        for p in (src, dst):
+            try:
+                if p and os.path.exists(p):
+                    os.unlink(p)
+            except Exception:
+                pass
+
+
 # ── Именной видео-кружок Алёны (Ф2): рендер твина по тексту → video_note ──────
 _GEN_URL = "https://api.heygen.com/v2/video/generate"
 _STATUS_URL = "https://api.heygen.com/v1/video_status.get"
@@ -169,7 +272,12 @@ async def send_kruzhok_to(bot, chat_id: int, text: str) -> bool:
         return False
     try:
         await bot.send_chat_action(chat_id, "record_video_note")
-        await bot.send_video_note(chat_id, BufferedInputFile(data, filename="alena.mp4"))
+        # 04.07 (фидбек Кая «оффер пришёл не кружком»): Telegram надёжно рисует
+        # круглое сообщение только при квадрате ≤640 + явных length/duration.
+        vn, length, duration = await _to_video_note(data)
+        await bot.send_video_note(
+            chat_id, BufferedInputFile(vn, filename="alena.mp4"),
+            length=length, duration=duration)
         try:
             from database import log_event
             await log_event(chat_id, "video_note_sent", "offer")
@@ -196,7 +304,7 @@ async def send_voice_to(bot, chat_id: int, text: str, reply_markup=None) -> bool
     if not audio:
         return False
     try:
-        await bot.send_voice(chat_id, BufferedInputFile(audio, filename="alena.mp3"),
+        await bot.send_voice(chat_id, await _voice_file(audio),
                              reply_markup=reply_markup)
         await _mark_voice_sent(chat_id, text)
         return True
@@ -224,7 +332,7 @@ async def send_voice_reply(message, text: str, reply_markup=None) -> bool:
         return False
     try:
         await message.answer_voice(
-            BufferedInputFile(audio, filename="alena.mp3"),
+            await _voice_file(audio),
             reply_markup=reply_markup)
         await _mark_voice_sent(message.chat.id, text)
         return True
