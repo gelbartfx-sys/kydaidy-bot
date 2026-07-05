@@ -183,6 +183,31 @@ async def cb_check_sub(cb: CallbackQuery):
         await cb.answer("Пока не вижу подписки — подпишись и жми ещё раз 🙏", show_alert=True)
 
 
+def _subscribe_kbd() -> InlineKeyboardMarkup:
+    """Мягкий нудж подписки на канал: дверь в канал + «я уже там» (переиспользует
+    cb_check_sub, который трактует None/True как «засчитано»)."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🕯 Заглянуть в канал", url=_CHANNEL_URL),
+        InlineKeyboardButton(text="✅ Я уже там", callback_data="check_sub"),
+    ]])
+
+
+async def _nudge_subscribe_photo(message: Message):
+    """Мягкий нудж подписки после фото, когда встреча НЕ открылась (живой сессии
+    нет — прерывать нечего). Крэш-сейф; тест-аккаунты не шумим."""
+    try:
+        if _is_unlimited(message.from_user):
+            return
+        await message.answer(
+            "Пока рисовала тебя — подумала: если захочешь быть рядом между "
+            "встречами, я почти каждый день пишу в канале то, что не влезает в "
+            "переписку — без причёсанного тона, как есть. Не обязательно. Просто "
+            "дверь открыта 🕯",
+            parse_mode=None, reply_markup=_subscribe_kbd())
+    except Exception:
+        logger.warning("_nudge_subscribe_photo failed (continuing)", exc_info=True)
+
+
 def _nurture_optin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -193,10 +218,12 @@ def _nurture_optin_keyboard() -> InlineKeyboardMarkup:
 
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
+    # Тест-первым (мандат Кая 05.07): «Узнать свою Тень» = входной лид-магнит,
+    # первой кнопкой; синхронно с текстом WELCOME_NO_POVOROT (он уже тест-первый).
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Алёна на связи", callback_data="alena")],
             [InlineKeyboardButton(text="🌑 Узнать свою Тень", callback_data="quiz")],
+            [InlineKeyboardButton(text="💬 Алёна на связи", callback_data="alena")],
             [InlineKeyboardButton(text="🛍️ Что доступно", callback_data="products")],
             [InlineKeyboardButton(text="👤 Мой кабинет", callback_data="cabinet")],
         ]
@@ -481,6 +508,7 @@ async def on_photo(message: Message):
                 parse_mode="Markdown",
                 reply_markup=_products_menu_keyboard(),
             )
+            await _nudge_subscribe_photo(message)  # встречи нет → нудж безопасен
         return
     finally:
         _generating_shadow.discard(tg_id)   # #2: снять лок генерации (успех/ошибка)
@@ -517,6 +545,7 @@ async def on_photo(message: Message):
             parse_mode="Markdown",
             reply_markup=_products_menu_keyboard(),
         )
+        await _nudge_subscribe_photo(message)  # opened=False → встречи нет, нудж безопасен
     if not _is_unlimited(message.from_user):
         await mark_shadow_generated(tg_id)
     # Сохраняем распределение Тени — AI-проводник практик адаптируется под него.

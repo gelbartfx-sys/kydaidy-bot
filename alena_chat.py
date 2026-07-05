@@ -1257,7 +1257,7 @@ _STALE_NUDGE_VOICE = (
 _LADDER_TEXT = (
     "Мы рядом уже пару недель. Если чувствуешь, что какая-то тема просится "
     "глубже, чем чат и эфиры, — есть живой разбор один на один: час только "
-    "про тебя. Мест — всего восемь в месяц. Дверь — под этим сообщением."
+    "про тебя. Дверь — под этим сообщением."
 )
 
 
@@ -1429,6 +1429,24 @@ async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
         logger.warning("offer fallback send failed", exc_info=True)
 
 
+async def _nudge_channel(message: Message, user):
+    """Мягкий нудж подписки на канал в КОНЦЕ встречи (пик доверия) — отдельным
+    коротким сообщением ПОСЛЕ оффера, не в платной клавиатуре. Крэш-сейф.
+    Уже подписанных не трогаем (бот админ @kydaidy → _is_subscribed надёжен;
+    None/сбой → мягко покажем, cb_check_sub всё равно засчитает)."""
+    try:
+        from handlers import _is_subscribed, _subscribe_kbd
+        if await _is_subscribed(message.bot, user.id) is True:
+            return
+        await message.answer(
+            "И ещё — что бы ты сейчас ни выбрала, я никуда не денусь: в канале "
+            "я рядом каждый день, там честное, без глазури. Если тебя там ещё "
+            "нет — заходи.",
+            parse_mode=None, reply_markup=_subscribe_kbd())
+    except Exception:
+        logger.warning("_nudge_channel failed (continuing)", exc_info=True)
+
+
 async def _after_close(message: Message, user, request: str | None = None):
     # Сегментация оффера — ТОЛЬКО по реальному членству в Клубе (фикс 02.07:
     # whitelist-тестеры раньше улетали в VIP-ветку и не видели боевой путь —
@@ -1449,8 +1467,8 @@ async def _after_close(message: Message, user, request: str | None = None):
             bridge = (
                 f"«{q}» — вот с чем ты пришла на самом деле. Увидеть — уже "
                 "много, но не всё: прожить и поменять такое в переписке не "
-                "выходит. Это работа для живой встречи, один на один. Свободных "
-                "мест у меня всего восемь в месяц. Если что-то ещё держит — "
+                "выходит. Это работа для живой встречи, один на один. "
+                "Если что-то ещё держит — "
                 "просто напиши мне, отвечу как есть. Готова — дверь под этим "
                 "сообщением: после оплаты я открою тебе запись прямо здесь, в "
                 "чате, выберешь удобное время — и продолжим ровно с этого места.")
@@ -1478,7 +1496,7 @@ async def _after_close(message: Message, user, request: str | None = None):
                 "Такое не отражают в чате — это проживают: медленно, один на "
                 "один, пока не отпустит. Скажу прямо: возьми свой запрос в "
                 "личную работу со мной — встречи наедине, где есть только ты и "
-                "он. Живых окон — всего восемь в месяц. А если сначала мягче — рядом Клуб, где "
+                "он. А если сначала мягче — рядом Клуб, где "
                 "можно просто побыть в кругу. Сомневаешься или есть вопрос — "
                 "напиши, отвечу честно. Обе двери — под этим сообщением.")
             if await send_voice_reply(message, flagship, _bridge_kbd()):
@@ -1486,6 +1504,7 @@ async def _after_close(message: Message, user, request: str | None = None):
             else:
                 await message.answer(flagship + "\n\n— Алёна",
                                      reply_markup=_bridge_kbd(), parse_mode=None)
+            await _nudge_channel(message, user)
             await _schedule_followups(user.id)
             return
         # Совещание 1:1 (03.07), pull-триггер: она САМА просила «глубже/лично» в
@@ -1497,7 +1516,7 @@ async def _after_close(message: Message, user, request: str | None = None):
             depth = (
                 f"«{q}» — и ты сама потянулась глубже. Услышала. То, что просит "
                 "изнутри, перепиской не закрыть — для такого есть живые встречи "
-                "наедине, только про тебя. Мест — восемь на месяц. Входить "
+                "наедине, только про тебя. Входить "
                 "постепенно — рядом Клуб: круг, эфиры, моя ежедневная опора. "
                 "Что останавливает — спроси прямо здесь, я на связи. Обе "
                 "двери — ниже.")
@@ -1506,6 +1525,7 @@ async def _after_close(message: Message, user, request: str | None = None):
             else:
                 await message.answer(depth + "\n\n— Алёна",
                                      reply_markup=_bridge_kbd(), parse_mode=None)
+            await _nudge_channel(message, user)
             await _schedule_followups(user.id)
             return
         # Бесплатная встреча исчерпана → оффер Клуба = ИМЕННОЙ КРУЖОК (мандат Кая:
@@ -1525,6 +1545,7 @@ async def _after_close(message: Message, user, request: str | None = None):
         _name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
         asyncio.create_task(_offer_kruzhok(
             message.bot, message.chat.id, user.id, _name, q))
+        await _nudge_channel(message, user)
         await _schedule_followups(user.id)
         return
 
@@ -1544,4 +1565,5 @@ async def _after_close(message: Message, user, request: str | None = None):
     else:
         await message.answer(soft + "\n\n— Алёна",
                              reply_markup=_club_only_kbd(), parse_mode=None)
+    await _nudge_channel(message, user)
     await _schedule_followups(user.id)
