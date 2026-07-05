@@ -893,7 +893,19 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
     # (3) 🔴 мозг дошёл до фазы native_offer — ЖЕЛЕЗНО закрываем, даже если Haiku не
     # выдал CLOSE_MARK. Без этого коуч питчит Клуб, но ссылку на оплату не даёт
     # (баг: питч заканчивался вопросом, кнопка не появлялась).
-    closed = (CLOSE_MARK in reply) or force_close or (brain_phase == "native_offer")
+    # 🔴 Денежный фикс (05.07, диагностика): раньше закрытие висело ТОЛЬКО на
+    # маркере/фазе. Мозг часто прощался нарративно («на сегодня достаточно»,
+    # «этого пока хватит») БЕЗ маркера → _after_close не звался → НЕ было ни
+    # оффера, ни кружка, ни дожима (прямая потеря денег). Детектор завершающих
+    # фраз = 4-я нога флага: сказала «хватит/достаточно/остановимся» → закрываем
+    # с оффером в любом случае. Path-agnostic (чинит и мозг v2, и v1).
+    _closing_phrase = bool(re.search(
+        r"(на\s+сегодня|на\s+сейчас|пока)\s+(этого\s+)?(достаточно|хватит)"
+        r"|этого\s+(пока\s+)?(достаточно|хватит)"
+        r"|(давай\s+)?(на\s+этом\s+)?(и\s+)?остановимся"
+        r"|это\s+была\s+тво[яю]\s+(пробн|бесплатн|перв)", reply, re.I))
+    closed = (CLOSE_MARK in reply) or force_close \
+        or (brain_phase == "native_offer") or _closing_phrase
     reply = reply.replace(CLOSE_MARK, "").strip()
     reply, request = extract_request(reply)
     reply, dossier_new = extract_dossier(reply)
