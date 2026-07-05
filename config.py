@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     # /voices/speech (голос Digital Twin Алёны, ~бесплатно, ключ уже в Render).
     # Крэш-сейф: любой сбой TTS → тот же ответ текстом, ход не теряется.
     voice_replies_enabled: bool = True
-    alena_voice_id: str = "05f5549c38234b74a65c46a0c8937b5e"  # голос твина A «Алёна»
+    alena_voice_id: str = "426260a7ae6f4174a86cf5b88b66da50"  # голос #3 «Алёна второй» (как в стриме/разборах, выбран Каем 04.07)
     # Темп речи Алёны (мандат Кая 04.07: «чуть ускорить, 1.1 — хорошо»).
     # Применяется ffmpeg'ом при перекоде в OGG/Opus; 1.0 = без ускорения.
     voice_tempo: float = 1.1
