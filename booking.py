@@ -21,7 +21,7 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup)
 
 from config import settings
-from database import get_oneonone, dec_oneonone, get_user
+from database import get_oneonone, dec_oneonone, get_user, booking_issue
 
 logger = logging.getLogger(__name__)
 
@@ -34,15 +34,20 @@ TARIFF_3X_URL = "https://t.me/tribute/app?startapp=sZXr"  # 3 встречи/м�
 CURATOR = "@al_lazovsky"
 
 
-def _calendly_url(user: dict | None) -> str:
-    """Ссылка на календарь Алёны; если знаем вскрытый запрос — префиллим тему."""
+def _calendly_url(user: dict | None, tg_id: int, booking_id: int | None) -> str:
+    """Ссылка на календарь Алёны. Префилл темы (a1) + проброс tg_id/booking_id в
+    utm_content/utm_campaign — Calendly вернёт их в tracking инвайти, и polling
+    (calendly.py) сматчит реальную бронь с нашей встречей."""
+    from urllib.parse import quote
     url = settings.calendly_1on1_url
+    params = [f"utm_source=kydaidy_bot", f"utm_content={tg_id}"]
+    if booking_id:
+        params.append(f"utm_campaign={booking_id}")
     req = (user or {}).get("last_ai_request") if user else None
     if req:
-        from urllib.parse import quote
-        sep = "&" if "?" in url else "?"
-        url = f"{url}{sep}a1={quote(str(req)[:200])}"
-    return url
+        params.append(f"a1={quote(str(req)[:200])}")
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}" + "&".join(params)
 
 
 async def start_booking(message: Message):
@@ -129,7 +134,10 @@ async def cb_book_confirm(callback: CallbackQuery):
     sub = await get_oneonone(tg_id)
     left = int((sub or {}).get("sessions_left") or 0)
     user = await get_user(tg_id)
-    url = _calendly_url(user)
+    # pending-бронь для сверки с Calendly (polling вернёт встречу, если клиент
+    # отменит или не запишется). Без Calendly-токена booking_id просто не сматчится.
+    booking_id = await booking_issue(tg_id)
+    url = _calendly_url(user, tg_id, booking_id)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 Выбрать время", url=url)],

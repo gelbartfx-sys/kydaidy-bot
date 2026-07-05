@@ -357,6 +357,18 @@ _RUNTIME_MIGRATIONS = (
         period_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""",
+    # Брони 1:1 для сверки с Calendly (polling, 05.07). При выдаче ссылки создаём
+    # pending-запись (встреча уже списана — жёсткий кап). Polling матчит реальную
+    # бронь по utm_content=tg_id → 'booked'; отмену → возврат встречи ('canceled');
+    # pending дольше суток без брони → возврат ('expired_restored').
+    """CREATE TABLE IF NOT EXISTS oneonone_bookings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER,
+        issued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        event_uri TEXT,
+        status TEXT DEFAULT 'pending',
+        matched_at TIMESTAMP
+    )""",
 )
 
 
@@ -516,6 +528,97 @@ async def get_oneonone(tg_id: int) -> dict | None:
     except Exception:
         logger.warning("get_oneonone failed (continuing)", exc_info=True)
         return None
+
+
+async def inc_oneonone(tg_id: int) -> bool:
+    """Вернуть 1 встречу (не выше тарифа). Для авто-возврата, когда клиент отменил
+    бронь или не записался. Крэш-сейф. True — возвращено."""
+    try:
+        row = await get_oneonone(tg_id)
+        if not row:
+            return False
+        tariff = int(row.get("tariff") or 1)
+        if int(row.get("sessions_left") or 0) >= tariff:
+            return False  # уже полный — возвращать нечего
+        await _exec(
+            "UPDATE oneonone_subs SET sessions_left = sessions_left + 1, "
+            "updated_at = CURRENT_TIMESTAMP WHERE tg_id = ? AND sessions_left < tariff",
+            (tg_id,))
+        return True
+    except Exception:
+        logger.warning("inc_oneonone failed (continuing)", exc_info=True)
+        return False
+
+
+# ── Брони 1:1 (сверка с Calendly) ────────────────────────────────────────────
+async def booking_issue(tg_id: int) -> int | None:
+    """Создать pending-бронь при выдаче ссылки. Возвращает id (для utm_campaign)."""
+    try:
+        await _exec(
+            "INSERT INTO oneonone_bookings (tg_id, status) VALUES (?, 'pending')",
+            (tg_id,))
+        row = await _exec(
+            "SELECT id FROM oneonone_bookings WHERE tg_id = ? ORDER BY id DESC LIMIT 1",
+            (tg_id,), fetch="one")
+        return int(row["id"]) if row and row.get("id") is not None else None
+    except Exception:
+        logger.warning("booking_issue failed (continuing)", exc_info=True)
+        return None
+
+
+async def booking_pending_list():
+    """Все pending-брони (для матчинга с Calendly и проверки протухания)."""
+    try:
+        return await _exec(
+            "SELECT * FROM oneonone_bookings WHERE status = 'pending' "
+            "ORDER BY id ASC", fetch="all") or []
+    except Exception:
+        return []
+
+
+async def booking_get(booking_id: int):
+    try:
+        return await _exec("SELECT * FROM oneonone_bookings WHERE id = ?",
+                           (booking_id,), fetch="one")
+    except Exception:
+        return None
+
+
+async def booking_pending_expired(hours: int = 24):
+    """Pending-брони старше N часов (клиент получил ссылку, но не записался) —
+    их встречу возвращаем. Крэш-сейф."""
+    try:
+        return await _exec(
+            "SELECT * FROM oneonone_bookings WHERE status = 'pending' "
+            "AND datetime(issued_at, ?) < datetime('now')",
+            (f"+{int(hours)} hours",), fetch="all") or []
+    except Exception:
+        return []
+
+
+async def booking_by_event(event_uri: str):
+    try:
+        return await _exec("SELECT * FROM oneonone_bookings WHERE event_uri = ?",
+                           (event_uri,), fetch="one")
+    except Exception:
+        return None
+
+
+async def booking_set(booking_id: int, status: str, event_uri: str | None = None):
+    """Обновить статус брони (+ event_uri при матче). Крэш-сейф."""
+    try:
+        if event_uri is not None:
+            await _exec(
+                "UPDATE oneonone_bookings SET status = ?, event_uri = ?, "
+                "matched_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, event_uri, booking_id))
+        else:
+            await _exec(
+                "UPDATE oneonone_bookings SET status = ?, "
+                "matched_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, booking_id))
+    except Exception:
+        logger.warning("booking_set failed (continuing)", exc_info=True)
 
 
 async def dec_oneonone(tg_id: int) -> bool:

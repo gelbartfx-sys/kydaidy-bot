@@ -31,6 +31,7 @@ from alena_chat import (alena_router, run_stale_session_tick,
                         run_orphan_turn_tick, run_club_ladder_tick)
 from heygen_credits import run_credit_check
 from booking import book_router
+from calendly import reconcile_tick as calendly_reconcile_tick
 from curator import curator_router, push_daily_batch, publish_tick
 from growth_agent import growth_router, run_growth_tick
 from followup import run_followup_tick
@@ -190,6 +191,10 @@ async def main():
     # потерялся, cron добьёт sessions_left до тарифа активным подписчикам, чей
     # период старше ~30 дней — оплативший не заперт со 2-го месяца.
     scheduler.add_job(_oneonone_reconcile_tick, "interval", hours=24)
+    # Calendly polling: списание на реальную бронь / возврат при отмене-незаписи.
+    # No-op без CALENDLY_API_TOKEN (флоу деградирует к ручному возврату Алёной).
+    scheduler.add_job(calendly_reconcile_tick, "interval",
+                      minutes=settings.calendly_poll_min, args=[bot])
     scheduler.start()
 
     # Webhook server (для Tally + Tribute)

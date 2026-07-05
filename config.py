@@ -104,6 +104,13 @@ class Settings(BaseSettings):
     # тему запроса префиллим через ?a1=... (первый кастомный вопрос формы).
     calendly_1on1_url: str = "https://calendly.com/al-lazovsky/30min"
 
+    # Calendly API (Standard+): токен из env (в код/git НЕ кладём). Пустой → polling
+    # -сверка встреч 1:1 выключена (флоу деградирует к ручному возврату Алёной).
+    calendly_api_token: str = ""
+    calendly_user_uri: str = "https://api.calendly.com/users/9dae55b5-16c4-4145-8efc-9c9c695a27fe"
+    calendly_org_uri: str = "https://api.calendly.com/organizations/bf324178-9b0a-4723-92b3-87b287de7593"
+    calendly_poll_min: int = 10  # как часто опрашивать Calendly (мин)
+
     # Closed TG channel IDs (numeric, like -1001234567890). Bot must be admin
     # with "Invite Users via Link" permission. Empty => fallback text without link.
     manifest_7_channel_id: int = 0
