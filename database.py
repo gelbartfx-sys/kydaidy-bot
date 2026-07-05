@@ -1325,13 +1325,21 @@ async def pq_counts():
 # ── Волна 1 (H12): события воронки ────────────────────────────────────────────
 
 async def log_event(tg_id: int, event: str, meta: str | None = None):
-    """Записать событие воронки. Крэш-сейф: телеметрия НИКОГДА не роняет поток."""
+    """Записать событие воронки в D1 + зеркалом в PostHog. Крэш-сейф: телеметрия
+    НИКОГДА не роняет поток (обе ветки независимо обёрнуты)."""
     try:
         await _exec(
             "INSERT INTO funnel_events (tg_id, event, meta) VALUES (?, ?, ?)",
             (tg_id, event, (meta or None)))
     except Exception:
         logger.warning("log_event(%s) failed (continuing)", event, exc_info=True)
+    # Зеркало в PostHog (аналитика воронки) — отдельный try, чтобы падение аналитики
+    # не влияло на запись в D1 и на ход клиентки. Нет ключа → capture() сам no-op.
+    try:
+        from analytics import capture as _ph_capture
+        await _ph_capture(tg_id, event, ({"meta": meta} if meta else None))
+    except Exception:
+        pass
 
 
 async def event_counts(days: int = 30):

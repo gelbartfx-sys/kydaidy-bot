@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     tribute_webhook_secret: str = ""
     tally_webhook_secret: str = ""
 
+    # PostHog (аналитика воронки, free eu). ingestion-ключ phc_… (только запись).
+    # Пусто → аналитика молча выключена (analytics.capture — no-op). В проде задать
+    # POSTHOG_API_KEY в Render env, чтобы события полетели в дашборд.
+    posthog_api_key: str = ""
+    posthog_host: str = "https://eu.i.posthog.com"
+
     # Fail-closed by default: webhooks without a configured signing secret are
     # rejected. Set true ONLY for local dev to accept unsigned webhook calls.
     webhook_dev_allow_unsigned: bool = False
