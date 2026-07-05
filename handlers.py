@@ -226,6 +226,13 @@ def _menu_only_kbd() -> InlineKeyboardMarkup:
 @router.callback_query(F.data == "menu")
 async def cb_menu(callback: CallbackQuery):
     """Возврат в главное меню из любого экрана."""
+    # I10: выход в меню = выход из активной встречи → закрываем сессию (синхрон
+    # состояния, иначе следующий текст трактуется как реплика в разговоре).
+    try:
+        from database import ai_close_all_active
+        await ai_close_all_active(callback.from_user.id)
+    except Exception:
+        logger.warning("cb_menu: ai_close_all_active failed", exc_info=True)
     await callback.message.answer(
         "Главное меню. Куда идём?", reply_markup=_main_menu_keyboard())
     await callback.answer()
@@ -535,6 +542,15 @@ async def on_document(message: Message):
 async def cmd_start(message: Message):
     user = message.from_user
     await upsert_user(user.id, user.username, user.first_name)
+
+    # I10: /start = выход из активной AI-встречи. Закрываем сессию, иначе
+    # состояние рассинхронится (человек «вышел» в меню, а система думает, что
+    # разговор идёт, и следующий текст уходит в мозг). Крэш-сейф.
+    try:
+        from database import ai_close_all_active
+        await ai_close_all_active(user.id)
+    except Exception:
+        logger.warning("cmd_start: ai_close_all_active failed", exc_info=True)
 
     existing = await get_user(user.id)
     if existing and existing["povorot"]:
