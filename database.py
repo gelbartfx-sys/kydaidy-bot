@@ -737,6 +737,47 @@ async def get_active_subscription(tg_id: int, product_code: str):
         (tg_id, product_code), fetch="one")
 
 
+async def deactivate_subscription(tg_id: int, product_code: str) -> None:
+    """Отмена подписки (Tribute cancelledSubscription): active=0 + cancelled_at.
+    Закрывает вечный доступ и ОЖИВЛЯЕТ сегмент реактивации club_churn
+    (active=0 OR cancelled_at IS NOT NULL). Крэш-сейф. Счётчик встреч 1:1 тут
+    НЕ трогаем — оплаченный период клиент дорабатывает; следующий сброс просто
+    не наступит (нет продления + cron сверяет активность подписки)."""
+    try:
+        await _exec(
+            "UPDATE subscriptions SET active = 0, cancelled_at = CURRENT_TIMESTAMP "
+            "WHERE tg_id = ? AND product_code = ? AND active = 1",
+            (tg_id, product_code))
+    except Exception:
+        logger.warning("deactivate_subscription failed (continuing)", exc_info=True)
+
+
+async def reconcile_oneonone_due(days: int = 29) -> int:
+    """Cron-страховка сброса счётчика 1:1 (мандат «швейцарские часы» 05.07):
+    если период старше ~30 дней, а вебхук продления НЕ пришёл (потерян/таймаут),
+    но подписка 1:1 ещё активна — добить sessions_left до тарифа. Вебхук —
+    основной путь, cron — подстраховка, чтобы оплативший не заперся со 2-го
+    месяца. Отменённые (active=0) НЕ трогаем. Возвращает число сброшенных."""
+    try:
+        rows = await _exec(
+            "SELECT tg_id, tariff FROM oneonone_subs "
+            "WHERE period_start <= datetime('now', ?)", (f"-{days} days",),
+            fetch="all") or []
+    except Exception:
+        logger.warning("reconcile_oneonone_due select failed", exc_info=True)
+        return 0
+    n = 0
+    for r in rows:
+        tg = r.get("tg_id"); tar = int(r.get("tariff") or 1)
+        try:
+            if await get_active_subscription(tg, "manifest_1on1"):
+                await set_oneonone(tg, tar, tar)
+                n += 1
+        except Exception:
+            logger.warning("reconcile_oneonone row failed tg=%s", tg, exc_info=True)
+    return n
+
+
 async def memory_allowed(tg_id: int) -> bool:
     """ЕДИНЫЙ гейт памяти (мандат Кая 04.07, «чистый лист для не купивших»):
     досье прошлых встреч можно подавать модели ТОЛЬКО купившим — член Клуба

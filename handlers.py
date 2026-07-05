@@ -60,7 +60,7 @@ VALID_PRODUCT_CODES = ("manifest_club", "manifest_1on1")
 # copyMessage doesn't preserve the original inline keyboard, so we add it back.
 PRODUCT_BUY_URLS = {
     "manifest_club": ("Подписаться", "https://t.me/tribute/app?startapp=sULY"),
-    "manifest_1on1": ("Записаться",  "https://web.tribute.tg/p/vKG"),
+    "manifest_1on1": ("Оформить подписку", "https://t.me/tribute/app?startapp=sZXq"),
 }
 
 # ── Атрибуция источника трафика (deep-link /start <tag>) ─────────────────────
@@ -82,7 +82,7 @@ _SOURCE_ALIAS = {
 
 
 # Функциональные deep-link префиксы — их НИКОГДА не считаем источником.
-_FUNC_PREFIXES = ("s_", "shadow_", "povorot")
+_FUNC_PREFIXES = ("s_", "shadow_", "povorot", "book1on1")
 
 # Человекочитаемые имена продуктов для /cabinet (product_code содержит «_»,
 # который ломает Markdown-разметку — показываем чистое имя).
@@ -239,16 +239,18 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
     или суффикс ?start=s_ABCDE__pin. First-touch — пишем только первый источник."""
     args = command.args or ""
     user = message.from_user
-    args, source = _split_source(args)
 
     # Запись на 1:1 из канала «Манифест · 1:1» (кнопка ?start=book1on1).
-    # Регистрируем юзера и сразу ведём в поток записи (проверка счётчика встреч).
+    # ВАЖНО: обрабатываем ДО _split_source — иначе атрибуция нормализует
+    # «book1on1» как метку источника (args становится "") и ветка ниже не
+    # срабатывает → кнопка записи роняла бы юзера на общее приветствие.
     if args == "book1on1":
         await upsert_user(user.id, user.username, user.first_name)
-        await set_user_source(user.id, source)
         from booking import start_booking
         await start_booking(message)
         return
+
+    args, source = _split_source(args)
 
     # Тест тёмных архетипов с полным распределением: /start s_<10 символов>.
     if args.startswith("s_"):

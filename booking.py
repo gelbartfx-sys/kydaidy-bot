@@ -140,3 +140,25 @@ async def cb_book_confirm(callback: CallbackQuery):
         "Выбери удобное время в моём календаре — и я буду ждать тебя там. "
         f"Если планы изменятся, просто напиши мне: {CURATOR}.",
         reply_markup=kb, parse_mode=None)
+
+    # Уведомляем Алёну (куратора) и Кая (админа) о факте записи — иначе живая
+    # встреча состоится вслепую (кто/какой запрос). Тема — вскрытый запрос, если
+    # есть. Крэш-сейф: сбой уведомления не ломает саму запись клиента.
+    await _notify_booking(callback, user, left)
+
+
+async def _notify_booking(callback: CallbackQuery, user: dict | None, left: int):
+    u = callback.from_user
+    who = (("@" + u.username) if u.username else (u.full_name or str(u.id)))
+    req = (user or {}).get("last_ai_request") or "—"
+    text = (f"🗓 Запись 1:1: {who} (id {u.id})\n"
+            f"Запрос: {req}\n"
+            f"Осталось встреч в месяце: {left}\n"
+            "Клиент выбирает время в Calendly — свяжись, если нужно уточнить тему.")
+    for admin_id in {settings.tg_admin_id, settings.curator_id}:
+        if not admin_id:
+            continue
+        try:
+            await callback.bot.send_message(admin_id, text, parse_mode=None)
+        except Exception:
+            logger.warning("booking notify failed for %s", admin_id, exc_info=True)

@@ -24,7 +24,7 @@ from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import settings
-from database import init_db
+from database import init_db, reconcile_oneonone_due
 from handlers import router
 from manifest7_guide import guide_router
 from alena_chat import (alena_router, run_stale_session_tick,
@@ -110,6 +110,17 @@ async def _admin_chat_id(message: Message):
         logging.exception("admin chat_id handler failed")
 
 
+async def _oneonone_reconcile_tick():
+    """Ежедневная сверка счётчика встреч 1:1 (страховка на случай потери
+    вебхука продления). Крэш-сейф — ошибка не роняет планировщик."""
+    try:
+        n = await reconcile_oneonone_due()
+        if n:
+            logging.info("1:1 reconcile: досброшено счётчиков — %s", n)
+    except Exception:
+        logging.exception("1:1 reconcile tick failed")
+
+
 async def main():
     await init_db()
 
@@ -175,6 +186,10 @@ async def main():
     scheduler.add_job(
         run_credit_check, "interval",
         hours=settings.credit_check_hours, args=[bot])
+    # Подписочный 1:1: страховка сброса счётчика встреч. Если вебхук продления
+    # потерялся, cron добьёт sessions_left до тарифа активным подписчикам, чей
+    # период старше ~30 дней — оплативший не заперт со 2-го месяца.
+    scheduler.add_job(_oneonone_reconcile_tick, "interval", hours=24)
     scheduler.start()
 
     # Webhook server (для Tally + Tribute)

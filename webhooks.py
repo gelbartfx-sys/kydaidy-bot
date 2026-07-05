@@ -15,7 +15,8 @@ from aiogram import Bot
 from urllib.parse import quote
 
 from config import settings
-from database import upsert_user, add_purchase, add_subscription, get_user, set_oneonone
+from database import (upsert_user, add_purchase, add_subscription, get_user,
+                      set_oneonone, get_oneonone, deactivate_subscription)
 from handlers import _send_povorot_result
 
 logger = logging.getLogger(__name__)
@@ -127,11 +128,15 @@ def _tribute_product_code(event: str, payload: dict) -> str | None:
         if ch_int is not None and settings.manifest_club_channel_id \
                 and ch_int == settings.manifest_club_channel_id:
             return "manifest_club"
-        # Фолбэк по имени/цене, если channel_id не пришёл (различаем 1:1 и Клуб).
+        # Фолбэк по имени, если channel_id не пришёл (различаем 1:1 и Клуб).
         name = str(payload.get("subscription_name") or payload.get("product_name") or "").lower()
         if any(k in name for k in ("1:1", "1 на 1", "1on1", "встреч", "сесс")):
             return "manifest_1on1"
-        return "manifest_club"  # дефолтная подписка
+        if any(k in name for k in ("клуб", "club")):
+            return "manifest_club"
+        # Неоднозначно (нет ни channel_id, ни узнаваемого имени) → НЕ дефолтим в
+        # Клуб (это мис-грант не в тот канал), а отдаём None → зовём админа разрулить.
+        return None
     if event in _TRIBUTE_DIGITAL_EVENTS:
         name = str(payload.get("product_name") or payload.get("digital_product_name")
                    or payload.get("subscription_name") or "").lower()
@@ -202,7 +207,14 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         #   • реальное продление следующего периода гарантированно сбросит счётчик.
         # Тариф определяем по сумме: ≈18000 → 3 встречи, иначе → 1 встреча.
         if code == "manifest_1on1" and event in _TRIBUTE_SUB_EVENTS:
-            tariff = 3 if amount >= int(settings.one_on_one_3x_price * 0.9) else 1
+            # Тариф: при ПРОДЛЕНИИ берём из БД (сумма в renew-вебхуке может не
+            # прийти → иначе тариф «3 встречи» ошибочно сбросился бы до 1). При
+            # первой оплате — по сумме (≈18000 → 3, иначе 1).
+            _existing = await get_oneonone(tg_id)
+            if event != "newSubscription" and _existing and _existing.get("tariff"):
+                tariff = int(_existing["tariff"])
+            else:
+                tariff = 3 if amount >= int(settings.one_on_one_3x_price * 0.9) else 1
             # Период для дедупа сброса. Если Tribute не прислал ни одной date-метки
             # — падаем на месячный бакет (YYYY-MM): ретрай в том же месяце дедупится,
             # а реальное продление в новом месяце ГАРАНТИРОВАННО сбросит счётчик
@@ -218,7 +230,9 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 logger.info("Tribute 1:1: счётчик сброшен tg=%s тариф=%s встреч",
                             tg_id, tariff)
 
-        _dedup_key = f"pay_{event}_{payment_id}" if payment_id else ""
+        # Дедуп: при наличии payment_id — по нему; иначе фолбэк на event+tg+сумму
+        # (иначе идемпотентность отключалась бы и ретрай давал 2 доступа).
+        _dedup_key = f"pay_{event}_{payment_id}" if payment_id else f"pay_{event}_{tg_id}_{amount}"
         if _dedup_key and await get_meta(_dedup_key):
             logger.info("Tribute: дубль вебхука %s (payment_id=%s) — уже выдано, скип",
                         event, payment_id)
@@ -237,7 +251,15 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 await set_meta(_dedup_key, "1")
             logger.info("Tribute: продукт %s выдан %s", code, tg_id)
         elif event in _TRIBUTE_CANCEL_EVENTS:
-            logger.info("Tribute: отмена %s у %s (отзыв доступа — TODO)", code, tg_id)
+            # Отмена: деактивируем подписку (active=0 + cancelled_at). Доступ в
+            # закрытый канал Tribute отзывает сам (channel-gated подписка). Счётчик
+            # встреч 1:1 НЕ обнуляем — оплаченный период клиент дорабатывает, а
+            # следующий сброс просто не наступит (нет продления; cron сверяет
+            # активность). Это оживляет реактивацию club_churn (ушёл → вернём).
+            await deactivate_subscription(tg_id, code)
+            if _dedup_key:
+                await set_meta(_dedup_key, "1")
+            logger.info("Tribute: отмена %s у %s — подписка деактивирована", code, tg_id)
 
         return web.Response(status=200, text="ok")
     except Exception as e:
