@@ -116,7 +116,13 @@ async def _remaining(user) -> int | None:
     if _is_unlimited(user):
         return None
     if await _is_club_member(user.id):
-        used = await ai_sessions_used_30d(user.id)
+        # Считаем встречи ОТ даты вступления (не раньше), чтобы пробная встреча
+        # до покупки не съедала месячную квоту члена (аудит 05.07).
+        from database import get_active_subscription, ai_sessions_used_member
+        club = await get_active_subscription(user.id, "manifest_club")
+        since = (club or {}).get("started_at")
+        used = (await ai_sessions_used_member(user.id, since) if since
+                else await ai_sessions_used_30d(user.id))
         return max(0, CLUB_MONTHLY_SESSIONS - used)
     used = await ai_total_sessions(user.id)
     return max(0, FREE_SESSIONS - used)

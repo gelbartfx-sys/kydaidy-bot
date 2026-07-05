@@ -875,6 +875,18 @@ async def ai_sessions_used_30d(tg_id: int) -> int:
     return int((row or {}).get("n") or 0)
 
 
+async def ai_sessions_used_member(tg_id: int, since: str) -> int:
+    """Встречи члена Клуба за скользящее окно 30 дней, но НЕ раньше вступления
+    (since = subscriptions.started_at). Иначе бесплатная пробная встреча ДО
+    покупки съедала бы месячную квоту (аудит 05.07) — новый член получал 1 из 2."""
+    row = await _exec(
+        "SELECT COUNT(*) AS n FROM ai_sessions WHERE tg_id = ? "
+        "AND datetime(started_at) > datetime('now', '-30 days') "
+        "AND datetime(started_at) >= datetime(?)",
+        (tg_id, since), fetch="one")
+    return int((row or {}).get("n") or 0)
+
+
 async def ai_total_sessions(tg_id: int) -> int:
     row = await _exec(
         "SELECT COUNT(*) AS n FROM ai_sessions WHERE tg_id = ?",
