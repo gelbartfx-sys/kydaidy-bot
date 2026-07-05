@@ -584,6 +584,35 @@ async def booking_get(booking_id: int):
         return None
 
 
+async def oneonone_nobook_candidates(days: int = 3):
+    """I4: оплатил 1:1, но ни разу не открыл запись — счётчик нетронут
+    (sessions_left = tariff), подписка активна, период старше N дней. Крэш-сейф."""
+    try:
+        return await _exec(
+            "SELECT o.tg_id AS tg_id, o.tariff AS tariff FROM oneonone_subs o "
+            "WHERE o.sessions_left = o.tariff "
+            "AND datetime(o.period_start, ?) < datetime('now') "
+            "AND o.tg_id IN (SELECT tg_id FROM subscriptions "
+            "                WHERE product_code = 'manifest_1on1' AND active = 1)",
+            (f"+{int(days)} days",), fetch="all") or []
+    except Exception:
+        return []
+
+
+async def club_quiet_candidates(days: int = 20):
+    """I5: активный член Клуба, который не был на AI-встрече N дней — напомнить,
+    что встречи месяца доступны (не растерять). Крэш-сейф."""
+    try:
+        return await _exec(
+            "SELECT tg_id FROM subscriptions "
+            "WHERE product_code = 'manifest_club' AND active = 1 "
+            "AND tg_id NOT IN (SELECT tg_id FROM ai_sessions "
+            "                  WHERE datetime(started_at) > datetime('now', ?))",
+            (f"-{int(days)} days",), fetch="all") or []
+    except Exception:
+        return []
+
+
 async def booking_pending_expired(hours: int = 24):
     """Pending-брони старше N часов (клиент получил ссылку, но не записался) —
     их встречу возвращаем. Крэш-сейф."""
