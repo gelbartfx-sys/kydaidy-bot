@@ -87,29 +87,43 @@ async def _mark_voice_sent(chat_id: int, text: str):
 
 
 async def tts_bytes(text: str) -> bytes | None:
-    """Текст → байты аудио голосом Алёны. None при любом сбое (фолбэк на текст)."""
+    """Текст → байты аудио голосом Алёны. None при любом сбое (фолбэк на текст).
+
+    РЕТРАЙ (05.07): единичный транзиентный сбой /v3/voices/speech (таймаут,
+    HTTP 5xx/429, пустой ответ — например при пиковой нагрузке на HeyGen от
+    параллельной генерации контента) НЕ должен сразу ронять реплику в текст.
+    Пробуем до 3 раз с короткой паузой — голос остаётся дефолтом канала."""
     if not settings.heygen_api_key or not (text or "").strip():
         return None
-    try:
-        payload = {"text": text.strip(), "voice_id": settings.alena_voice_id}
-        headers = {"X-Api-Key": settings.heygen_api_key}
-        async with aiohttp.ClientSession() as s:
-            async with s.post(_SPEECH_URL, json=payload, headers=headers,
-                              timeout=aiohttp.ClientTimeout(total=45)) as r:
-                body = await r.json()
-            audio_url = ((body or {}).get("data") or {}).get("audio_url") \
-                or (body or {}).get("audio_url")
-            if not audio_url:
-                logger.warning("heygen speech: нет audio_url в ответе: %s",
-                               str(body)[:200])
-                return None
-            async with s.get(audio_url,
-                             timeout=aiohttp.ClientTimeout(total=45)) as r2:
-                data = await r2.read()
-        return data if data else None
-    except Exception:
-        logger.warning("heygen tts failed (fallback to text)", exc_info=True)
-        return None
+    payload = {"text": text.strip(), "voice_id": settings.alena_voice_id}
+    headers = {"X-Api-Key": settings.heygen_api_key}
+    for attempt in range(3):
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(_SPEECH_URL, json=payload, headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=40)) as r:
+                    status = r.status
+                    body = await r.json()
+                audio_url = ((body or {}).get("data") or {}).get("audio_url") \
+                    or (body or {}).get("audio_url")
+                if not audio_url:
+                    logger.warning("heygen speech попытка %s: нет audio_url (HTTP %s): %s",
+                                   attempt + 1, status, str(body)[:160])
+                    raise ValueError("no audio_url")
+                async with s.get(audio_url,
+                                 timeout=aiohttp.ClientTimeout(total=40)) as r2:
+                    data = await r2.read()
+            if data:
+                return data
+            raise ValueError("empty audio")
+        except Exception:
+            if attempt < 2:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            logger.warning("heygen tts failed после 3 попыток (fallback to text)",
+                           exc_info=True)
+            return None
+    return None
 
 
 # ── ffmpeg-слой (04.07, фидбек Кая): волна у голосовых + темп 1.1 + честный кружок ──
