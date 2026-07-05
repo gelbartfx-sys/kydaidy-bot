@@ -27,6 +27,13 @@ async def capture(distinct_id, event: str, props: dict | None = None) -> None:
     key = (getattr(settings, "posthog_api_key", "") or "").strip()
     if not key or not event:
         return
+    # Системные события (tts_debug/ffmpeg_missing и т.п. с tg_id<=0) не засоряют
+    # воронку синтетическим «пользователем 0».
+    try:
+        if int(distinct_id) <= 0:
+            return
+    except (TypeError, ValueError):
+        pass
     host = (getattr(settings, "posthog_host", "") or "https://eu.i.posthog.com").rstrip("/")
     payload = {
         "api_key": key,
@@ -37,7 +44,7 @@ async def capture(distinct_id, event: str, props: dict | None = None) -> None:
     try:
         async with aiohttp.ClientSession() as s:
             await s.post(f"{host}/capture/", json=payload,
-                         timeout=aiohttp.ClientTimeout(total=5))
+                         timeout=aiohttp.ClientTimeout(total=2))
     except Exception:
         logger.warning("posthog capture failed for event=%s (continuing)", event,
                        exc_info=True)
