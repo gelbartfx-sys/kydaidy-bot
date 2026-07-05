@@ -109,6 +109,14 @@ async def tts_bytes(text: str) -> bytes | None:
                 if not audio_url:
                     logger.warning("heygen speech попытка %s: нет audio_url (HTTP %s): %s",
                                    attempt + 1, status, str(body)[:160])
+                    # Диагностика в D1 (05.07): видеть ТОЧНУЮ причину сбоя TTS в проде
+                    # (401=ключ, 429=лимит, 402=кредиты) — Render-логи недоступны.
+                    try:
+                        from database import log_event
+                        await log_event(0, "tts_debug",
+                                        f"HTTP {status} · {str(body)[:120]}")
+                    except Exception:
+                        pass
                     raise ValueError("no audio_url")
                 async with s.get(audio_url,
                                  timeout=aiohttp.ClientTimeout(total=40)) as r2:
