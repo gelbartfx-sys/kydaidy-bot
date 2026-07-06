@@ -323,3 +323,27 @@ if __name__ == "__main__":
           "_valid_reply + _last_question fallback + _ensure_reply + "
           "binary_close + offer_kbd/member_offer_kbd + request_from_cm + "
           "offer_kbd_kind (bridge|club) + wave2 down-sell/trust директивы")
+
+
+# ── Мандат Кая 06.07: ни один ход не кончается голой констатацией ─────────────
+def test_needs_prompt_and_ensure_prompt():
+    from alena_chat import _needs_prompt, _ensure_prompt, _PROMPT_CUES
+    # есть вопрос → побуждение уже есть
+    assert _needs_prompt("Ты держишь всё сама. Что из этого твоё?") is False
+    # императив в финале → побуждение есть
+    assert _needs_prompt("Это броня. Расскажи, когда она появилась.") is False
+    assert _needs_prompt("Побудь с этим секунду.") is False
+    # голая констатация → нужен дошив (кейс Кая: «просто констатирует факты»)
+    assert _needs_prompt("Ты научилась справляться одна. Это стало бронёй.") is True
+    # пусто → не наше дело (закрывает _ensure_reply)
+    assert _needs_prompt("") is False
+    assert _needs_prompt(None) is False
+    # дошив: констатация получает приглашение, ротация по turns
+    base = "Ты научилась справляться одна. Это стало бронёй."
+    out = _ensure_prompt(base, 3)
+    assert out.startswith(base) and out != base
+    assert any(c in out for c in _PROMPT_CUES)
+    assert _ensure_prompt(base, 0) != _ensure_prompt(base, 1), "ротация форм"
+    # реплика с вопросом не трогается
+    q = "Что тут твоё на самом деле?"
+    assert _ensure_prompt(q, 5) == q

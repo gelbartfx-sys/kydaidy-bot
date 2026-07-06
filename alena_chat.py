@@ -908,6 +908,43 @@ def _ensure_reply(reply: str) -> str:
     return reply if (reply or "").strip() else _EMPTY_REPLY_STUB
 
 
+# Мандат Кая 06.07 (тест боем): Алёна НЕ имеет права закончить ход голой
+# констатацией — каждый её ход обязан звать её дальше (вопрос или побуждение).
+# Промпт-правило «вилка-или-микрошаг» модель иногда игнорирует → жёсткая
+# страховка в коде: нет ни «?», ни императива в финале → дошиваем приглашение
+# (уходит и в голос, и в текст — текст-дублёр сам подхватит вопрос).
+_IMPERATIVE_TAIL_RE = re.compile(
+    r"(расскаж|скажи|назови|вспомни|посмотри|побудь|попробуй|ответь|напиши|"
+    r"опиши|подел|представь|прислушайся|заметь|давай|шагн|тронь|жми|выбер|"
+    r"загляни|начни)", re.I)
+
+_PROMPT_CUES = (
+    "Что из этого отзывается в тебе сильнее всего?",
+    "Как это живёт у тебя — расскажи, как есть.",
+    "Узнаёшь себя в этом?",
+)
+
+
+def _needs_prompt(reply: str) -> bool:
+    """True — реплика кончается констатацией: нет ни вопроса, ни побуждения в
+    финальном предложении → нужен дошив приглашения. Чистая, тестируемая."""
+    t = (reply or "").strip()
+    if not t:
+        return False  # пустоту закрывает _ensure_reply
+    if "?" in t:
+        return False
+    sents = [s.strip() for s in re.split(r"(?<=[.!…])\s+", t) if s.strip()]
+    tail = sents[-1] if sents else t
+    return not _IMPERATIVE_TAIL_RE.search(tail)
+
+
+def _ensure_prompt(reply: str, turns: int) -> str:
+    """Дошить побуждение к констатирующей реплике (ротация форм — не робот)."""
+    if not _needs_prompt(reply):
+        return reply
+    return f"{reply.rstrip()} {_PROMPT_CUES[turns % len(_PROMPT_CUES)]}"
+
+
 def _last_question(text: str) -> str | None:
     """Хвост реплики для текст-дублёра после голосового.
 
@@ -1279,6 +1316,11 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
         # заглушка ВСЕГДА, включая ход закрытия (без неё финальная реплика перед
         # оффером уходит пустой — аудит воронки 06.07).
         reply = _ensure_reply(reply)
+        # Мандат Кая 06.07 (тест боем): НЕ закрывающий ход не смеет кончаться голой
+        # констатацией — дошиваем приглашение к её ходу (в голос И в текст).
+        # Закрывающий ход не трогаем: он намеренно «завершает мягко» перед оффером.
+        if not closed:
+            reply = _ensure_prompt(reply, turns)
         await ai_add_message(sid, user.id, "model", reply)
 
         if closed:
