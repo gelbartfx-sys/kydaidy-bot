@@ -994,8 +994,30 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
         r"^\s*(и\s+)?(что|как)\s+(же\s+)?(дальше|теперь|потом|мне\s+делать|делать)"
         r"|я\s+готов[ая]|готова\s+(идти|дальше|двигаться)"
         r"|что\s+ты\s+предлага|как\s+с\s+тобой", (text or ""), re.I))
+    # 🔴 Согласие на МОСТ (мандат Кая 06.07, вскрыто тестом боем): прошлая реплика
+    # Алёны звала перейти к главному («Идём?/продолжим?/готова?/начнём?»), а клиентка
+    # отвечает коротким «да/давай/идём/го» — это ГОТОВНОСТЬ к офферу. Без этого «да»
+    # на «Идём?» уходило в НОВЫЙ круг — воронка не доводила до продажи (потеря денег).
+    _prev_alena = ""
+    try:
+        for _m in reversed(history or []):
+            if isinstance(_m, dict) and _m.get("role") == "model":
+                _prev_alena = _m.get("content") or _m.get("text") or _m.get("message") or ""
+                break
+    except Exception:
+        _prev_alena = ""
+    _bridge_invite = bool(re.search(
+        r"(ид[её]м|продолжим|готова(\s+(идти|дальше))?|начн[её]м|поехали"
+        r"|двин[еуё]мся|пойд[её]м|погнали)\s*[?!.…]*\s*$",
+        (_prev_alena or "").strip(), re.I))
+    _user_affirm = bool(re.search(
+        r"^\s*(да|ага|угу|давай(те)?|ид[её]м|го|поехали|погнали|хочу|конечно"
+        r"|согласна|можно|нужно|ок(ей)?|начн[её]м|вперёд|вперед)\b",
+        (text or "").strip(), re.I))
+    _bridge_yes = _bridge_invite and _user_affirm
     closed = (CLOSE_MARK in reply) or force_close \
-        or (brain_phase == "native_offer") or _closing_phrase or _user_ready
+        or (brain_phase == "native_offer") or _closing_phrase or _user_ready \
+        or _bridge_yes
     reply = reply.replace(CLOSE_MARK, "").strip()
     reply, request = extract_request(reply)
     reply, dossier_new = extract_dossier(reply)
