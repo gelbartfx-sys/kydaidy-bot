@@ -34,10 +34,17 @@ _SPEECH_URL = "https://api.heygen.com/v3/voices/speech"
 VOICE_MIN_CHARS = 40
 VOICE_MAX_CHARS = 1600
 
-# Экономика касаний (мандат Кая 03.07): на клиента — до 12 голосовых и до 2
-# видео-кружков; текст безлимитен. Голос остаётся дефолтом ДО исчерпания квоты.
-VOICE_CAP_PER_CLIENT = 12
-VIDEO_NOTES_CAP_PER_CLIENT = 2
+# Экономика касаний. Рабочий лимит теперь ПЕР-ВСТРЕЧА (мандат Кая 06.07): 12
+# платных касаний (аудио+кружки) НА ВСТРЕЧУ, текст безлимитен — член Клуба
+# (2 встречи/мес) больше не глохнет навсегда в текст (лифтайм-баг Волны 0-2).
+# Лифтайм-краны ниже НЕ рабочий лимит, а широкий ПРЕДОХРАНИТЕЛЬ от runaway-цикла:
+# сломанный цикл отправки не сожжёт кошелёк HeyGen. Голос дёшев (~$0.02) — фьюз
+# 2000 = максимум ~$40 за всю жизнь клиента; 200 переглушало бы лояльного члена
+# Клуба (24 голоса/мес + опенеры) уже через ~8 месяцев (аудит W3 #6).
+VOICE_CAP_PER_CLIENT = 2000  # предохранитель от runaway (рабочий лимит — per-встреча)
+VIDEO_NOTES_CAP_PER_CLIENT = 40  # предохранитель от runaway (рабочий лимит — per-встреча)
+# Мандат Кая 06.07 — 12 платных касаний на встречу, текст безлимитен.
+PAID_TOUCH_CAP_PER_MEETING = 12
 
 
 def voice_fits(text: str) -> bool:
@@ -54,36 +61,85 @@ def _quota_exempt(chat_id: int) -> bool:
         return False
 
 
-async def voice_quota_ok(chat_id: int) -> bool:
-    """True — голос ещё можно; False — квота 12 исчерпана, вызывающий шлёт текст.
-    Крэш-сейф: сомнение трактуем в пользу голоса (регламент канала важнее квоты)."""
+def _paid_touch_allowed(count, cap: int, protected: bool) -> bool:
+    """Чистая логика бюджета касаний (тестируемо, без БД). protected (опенер и
+    оффер-кружок, Вариант А) — всегда True, вне лимита. count None → 0."""
+    if protected:
+        return True
+    return int(count or 0) < cap
+
+
+async def _current_session(chat_id: int):
+    """Активная встреча, иначе последняя (пост-встречные касания читают ТОТ ЖЕ
+    бюджет). None — встречи нет / сбой (крэш-сейф). Один фетч на отправку: его
+    делят гейт (чтение счётчика) и инкремент (по id)."""
+    try:
+        from database import ai_active_session, ai_last_session
+        return (await ai_active_session(chat_id)) or (await ai_last_session(chat_id))
+    except Exception:
+        return None
+
+
+async def paid_touch_ok(chat_id: int, sess=None) -> bool:
+    """True — платное касание (голос/кружок) на встрече ещё в бюджете (12/встреча).
+    Нет встречи → True (не душим, но и не бампим). Крэш-сейф → True (лучше потратить
+    цент, чем молча онеметь). sess можно пробросить — без второго похода в БД."""
     if _quota_exempt(chat_id):
         return True
     try:
-        from database import events_count_total
-        return (await events_count_total(chat_id, ("voice_sent",))) < VOICE_CAP_PER_CLIENT
+        if sess is None:
+            sess = await _current_session(chat_id)
+        if not sess:
+            return True
+        return _paid_touch_allowed(sess.get("paid_touch_count"),
+                                   PAID_TOUCH_CAP_PER_MEETING, protected=False)
     except Exception:
         return True
 
 
-async def video_quota_ok(chat_id: int) -> bool:
-    """True — кружок ещё можно (лимит 2: кружок Тени + именной оффер)."""
+async def voice_quota_ok(chat_id: int, sess=None) -> bool:
+    """True — голос ещё можно; False — вызывающий шлёт текст. Рабочий лимит теперь
+    ПЕР-ВСТРЕЧА (paid_touch_ok). Лифтайм-кран VOICE_CAP_PER_CLIENT оставлен ШИРОКИМ
+    предохранителем от runaway. Крэш-сейф: сомнение — в пользу голоса."""
     if _quota_exempt(chat_id):
         return True
     try:
         from database import events_count_total
-        return (await events_count_total(
-            chat_id, ("kruzhok_sent", "video_note_sent"))) < VIDEO_NOTES_CAP_PER_CLIENT
+        if (await events_count_total(chat_id, ("voice_sent",))) >= VOICE_CAP_PER_CLIENT:
+            return False  # предохранитель: сломанный цикл не жжёт кошелёк
     except Exception:
+        pass
+    return await paid_touch_ok(chat_id, sess)
+
+
+async def video_quota_ok(chat_id: int, sess=None) -> bool:
+    """True — кружок ещё можно. Рабочий лимит теперь ПЕР-ВСТРЕЧА (paid_touch_ok);
+    лифтайм-кран VIDEO_NOTES_CAP_PER_CLIENT — широкий предохранитель от runaway."""
+    if _quota_exempt(chat_id):
         return True
+    try:
+        from database import events_count_total
+        if (await events_count_total(
+                chat_id, ("kruzhok_sent", "video_note_sent"))) >= VIDEO_NOTES_CAP_PER_CLIENT:
+            return False  # предохранитель: сломанный цикл не жжёт кошелёк
+    except Exception:
+        pass
+    return await paid_touch_ok(chat_id, sess)
 
 
-async def _mark_voice_sent(chat_id: int, text: str):
+async def _mark_voice_sent(chat_id: int, text: str, sess_id: int | None = None):
     try:
         from database import log_event
         await log_event(chat_id, "voice_sent", str(len(text)))
     except Exception:
         pass
+    # Инкремент бюджета встречи — только для НЕ-protected касаний (sess_id задан).
+    if sess_id is not None:
+        try:
+            from database import ai_bump_paid_touch
+            await ai_bump_paid_touch(sess_id)
+        except Exception:
+            pass
 
 
 async def tts_bytes(text: str) -> bytes | None:
@@ -284,11 +340,14 @@ async def render_kruzhok(text: str, timeout_min: int = 7) -> bytes | None:
         return None
 
 
-async def send_kruzhok_to(bot, chat_id: int, text: str) -> bool:
+async def send_kruzhok_to(bot, chat_id: int, text: str, protected: bool = False) -> bool:
     """Отрендерить и отправить именной кружок. True — ушёл.
-    Гейт квоты — ДО рендера (кредиты HeyGen не тратим на исчерпавшего лимит)."""
-    if not await video_quota_ok(chat_id):
-        return False  # квота 2 кружков исчерпана → вызывающий шлёт голос/текст
+    Гейт квоты — ДО рендера (кредиты HeyGen не тратим на исчерпавшего лимит).
+    protected=True (оффер-кружок, Вариант А) — бюджет не проверяем и не бампим."""
+    # Один фетч встречи на отправку: делят гейт (чтение) и инкремент (по id).
+    sess = None if protected else await _current_session(chat_id)
+    if not protected and not await video_quota_ok(chat_id, sess):
+        return False  # бюджет касаний встречи исчерпан → вызывающий шлёт голос/текст
     data = await render_kruzhok(text)
     if not data:
         return False
@@ -305,19 +364,29 @@ async def send_kruzhok_to(bot, chat_id: int, text: str) -> bool:
             await log_event(chat_id, "video_note_sent", "offer")
         except Exception:
             pass
+        # Инкремент бюджета встречи — только НЕ-protected (оффер-кружок вне лимита).
+        if sess:
+            try:
+                from database import ai_bump_paid_touch
+                await ai_bump_paid_touch(sess["id"])
+            except Exception:
+                pass
         return True
     except Exception:
         logger.warning("send_video_note failed", exc_info=True)
         return False
 
 
-async def send_voice_to(bot, chat_id: int, text: str, reply_markup=None) -> bool:
+async def send_voice_to(bot, chat_id: int, text: str, reply_markup=None,
+                        protected: bool = False) -> bool:
     """То же, что send_voice_reply, но из фонового джоба (нет Message — только bot).
-    True — ушло голосом; False — вызывающий шлёт текст."""
+    True — ушло голосом; False — вызывающий шлёт текст.
+    protected=True (голосовой фолбэк оффера, Вариант А) — бюджет не трогаем."""
     if not settings.voice_replies_enabled or not voice_fits(text):
         return False
-    if not await voice_quota_ok(chat_id):
-        return False  # квота 12 голосовых исчерпана → вызывающий шлёт текст
+    sess = None if protected else await _current_session(chat_id)
+    if not protected and not await voice_quota_ok(chat_id, sess):
+        return False  # бюджет касаний встречи исчерпан → вызывающий шлёт текст
     try:
         await bot.send_chat_action(chat_id, "record_voice")
     except Exception:
@@ -328,23 +397,26 @@ async def send_voice_to(bot, chat_id: int, text: str, reply_markup=None) -> bool
     try:
         await bot.send_voice(chat_id, await _voice_file(audio),
                              reply_markup=reply_markup)
-        await _mark_voice_sent(chat_id, text)
+        await _mark_voice_sent(chat_id, text, sess["id"] if sess else None)
         return True
     except Exception:
         logger.warning("send_voice_to failed (fallback to text)", exc_info=True)
         return False
 
 
-async def send_voice_reply(message, text: str, reply_markup=None) -> bool:
+async def send_voice_reply(message, text: str, reply_markup=None,
+                           protected: bool = False) -> bool:
     """Отправить text ГОЛОСОВЫМ Алёны. True — ушло голосом, False — шли текстом.
 
     Пока генерится — индикатор «записывает голосовое…» (хореография присутствия:
     заодно маскирует латентность TTS как естественную паузу записи).
+    protected=True (опенер встречи, Вариант А) — бюджет не проверяем и не бампим.
     """
     if not settings.voice_replies_enabled or not voice_fits(text):
         return False
-    if not await voice_quota_ok(message.chat.id):
-        return False  # квота 12 голосовых исчерпана → вызывающий шлёт текст
+    sess = None if protected else await _current_session(message.chat.id)
+    if not protected and not await voice_quota_ok(message.chat.id, sess):
+        return False  # бюджет касаний встречи исчерпан → вызывающий шлёт текст
     try:
         await message.bot.send_chat_action(message.chat.id, "record_voice")
     except Exception:
@@ -356,7 +428,7 @@ async def send_voice_reply(message, text: str, reply_markup=None) -> bool:
         await message.answer_voice(
             await _voice_file(audio),
             reply_markup=reply_markup)
-        await _mark_voice_sent(message.chat.id, text)
+        await _mark_voice_sent(message.chat.id, text, sess["id"] if sess else None)
         return True
     except Exception:
         logger.warning("send_voice failed (fallback to text)", exc_info=True)

@@ -490,7 +490,7 @@ async def open_shadow_session(target: Message, user, code: str,
                      "Говори как есть — голосом или текстом. Я отвечаю вслух. "
                      "Замолчу на минуту — не пропала, просто думаю. Мой первый "
                      "вопрос — ниже. " + q)
-        if await send_voice_reply(target, hello):
+        if await send_voice_reply(target, hello, protected=True):
             await log_event(user.id, "voice_reply", "opener")
         else:
             await _send_alive(target, opener)
@@ -790,7 +790,7 @@ async def _do_start(callback: CallbackQuery):
         # всплывать как «не удалось открыть встречу» (_ALENA_FAIL) — это вводило в
         # заблуждение (баг вскрыт на тесте 06.07). Ловим тут, мягко просим написать.
         try:
-            if await send_voice_reply(callback.message, frame):
+            if await send_voice_reply(callback.message, frame, protected=True):
                 await log_event(user.id, "voice_reply", "opener")
                 await callback.message.answer(
                     "Мой вопрос:\n\n«С чем ты сейчас? Что привело?»\n\n"
@@ -1856,7 +1856,7 @@ async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
         _stop_rec = asyncio.Event()
         _recorder = asyncio.create_task(_keep_recording(bot, chat_id, _stop_rec))
         try:
-            sent = await send_kruzhok_to(bot, chat_id, script)
+            sent = await send_kruzhok_to(bot, chat_id, script, protected=True)
         finally:
             _stop_rec.set()
             try:
@@ -1876,7 +1876,7 @@ async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
         # Фолбэк сегментный (аудит W1 #2): члену Клуба нельзя питчить Клуб без
         # кнопки Клуба — его fallback = мост в 1:1 (передаётся из _after_close).
         spoken = " ".join(fallback.replace("— Алёна", "").split())
-        if await send_voice_to(bot, chat_id, spoken, kbd):
+        if await send_voice_to(bot, chat_id, spoken, kbd, protected=True):
             await log_event(tg_id, "offer_kruzhok", "fallback_voice")
             return
         await log_event(tg_id, "offer_kruzhok", "fallback_text")

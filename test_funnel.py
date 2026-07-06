@@ -22,6 +22,7 @@ from alena_chat import (
     _should_binary_close, _offer_kbd, _member_offer_kbd, _request_from_cm,
     _offer_kbd_kind, CLUB_URL, ONE_ON_ONE_URL,
 )
+from alena_voice import _paid_touch_allowed, PAID_TOUCH_CAP_PER_MEETING
 
 
 # ── Механизм 3: маппинг фаза → шаг воронки (1..12) ────────────────────────────
@@ -271,6 +272,32 @@ def test_objection_directive_wave2_texts():
     assert "покажу" in _OBJECTION_DIRECTIVE["trust"].lower(), "trust: не убеждаю — покажу"
 
 
+# ── Волна 3: бюджет «12 платных касаний на встречу» (Вариант А, деградация) ───
+def test_paid_touch_cap_is_12():
+    # Мандат Кая 06.07: ровно 12 платных касаний (аудио+кружки) на встречу.
+    assert PAID_TOUCH_CAP_PER_MEETING == 12
+
+
+def test_paid_touch_allowed_boundary():
+    cap = PAID_TOUCH_CAP_PER_MEETING
+    # Ниже потолка — можно; на потолке и выше — стоп (деградация в текст).
+    assert _paid_touch_allowed(0, cap, protected=False) is True
+    assert _paid_touch_allowed(11, cap, protected=False) is True
+    assert _paid_touch_allowed(12, cap, protected=False) is False, "12 = потолок"
+    assert _paid_touch_allowed(13, cap, protected=False) is False
+
+
+def test_paid_touch_allowed_protected_always_true():
+    # Вариант А: опенер и оффер-кружок — вне лимита, всегда True даже на потолке.
+    assert _paid_touch_allowed(12, PAID_TOUCH_CAP_PER_MEETING, protected=True) is True
+    assert _paid_touch_allowed(999, PAID_TOUCH_CAP_PER_MEETING, protected=True) is True
+
+
+def test_paid_touch_allowed_none_count():
+    # Свежая/домиграционная встреча (count None) = 0 касаний → можно.
+    assert _paid_touch_allowed(None, PAID_TOUCH_CAP_PER_MEETING, protected=False) is True
+
+
 if __name__ == "__main__":
     test_method_phase_to_step()
     test_clamp_readiness()
@@ -287,6 +314,10 @@ if __name__ == "__main__":
     test_request_from_cm()
     test_offer_kbd_kind()
     test_objection_directive_wave2_texts()
+    test_paid_touch_cap_is_12()
+    test_paid_touch_allowed_boundary()
+    test_paid_touch_allowed_protected_always_true()
+    test_paid_touch_allowed_none_count()
     print("OK: funnel_step map + offer_readiness clamp + [[PHASE]] strip + "
           "objection classifier (5 типов) + cap 3 soft-exit + "
           "_valid_reply + _last_question fallback + _ensure_reply + "

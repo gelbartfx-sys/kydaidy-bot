@@ -120,7 +120,8 @@ CREATE TABLE IF NOT EXISTS ai_sessions (
     turns INTEGER DEFAULT 0,
     started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     closed_at TIMESTAMP,
-    nudged_at TIMESTAMP
+    nudged_at TIMESTAMP,
+    paid_touch_count INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS ai_messages (
@@ -231,7 +232,8 @@ _RUNTIME_MIGRATIONS = (
         turns INTEGER DEFAULT 0,
         started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         closed_at TIMESTAMP,
-        nudged_at TIMESTAMP
+        nudged_at TIMESTAMP,
+        paid_touch_count INTEGER DEFAULT 0
     )""",
     """CREATE TABLE IF NOT EXISTS ai_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -301,6 +303,11 @@ _RUNTIME_MIGRATIONS = (
     # NULL => ещё не слали. Существующий прод-D1 уже имеет ai_sessions без неё —
     # ALTER докатывает; «duplicate column» после первого прогона ловит try/except.
     "ALTER TABLE ai_sessions ADD COLUMN nudged_at TIMESTAMP",
+    # ── Волна 3 (мандат Кая 06.07): бюджет «12 платных касаний НА ВСТРЕЧУ»
+    # (аудио+кружки). Счётчик пер-встреча вместо лифтайм-квоты — член Клуба
+    # (2 встречи/мес) больше не глохнет навсегда в текст. ALTER «duplicate column»
+    # после первого прогона ловит try/except в init_db — деградирует только фича.
+    "ALTER TABLE ai_sessions ADD COLUMN paid_touch_count INTEGER DEFAULT 0",
     # ── Скоринг лида (Фаза 1 AI-Алёны): «мозг» без изменения поведения.
     # Алёна каждый ход скрыто оценивает собеседника (маркер [[SCORE ...]]),
     # сигналы копятся здесь; чистая политика треков считается в lead_policy.py.
@@ -1127,6 +1134,14 @@ async def ai_close_session(session_id: int):
 async def ai_bump_turns(session_id: int):
     await _exec(
         "UPDATE ai_sessions SET turns = turns + 1 WHERE id = ?", (session_id,))
+
+
+async def ai_bump_paid_touch(session_id: int):
+    """Волна 3: +1 платное касание (голос/кружок) на встрече. Зеркало ai_bump_turns.
+    Крэш-сейф: сбой инкремента не должен ронять отправку — ловится у вызывающего."""
+    await _exec(
+        "UPDATE ai_sessions SET paid_touch_count = paid_touch_count + 1 "
+        "WHERE id = ?", (session_id,))
 
 
 async def ai_add_message(session_id: int, tg_id: int, role: str, content: str):
