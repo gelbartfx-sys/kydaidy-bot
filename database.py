@@ -1034,12 +1034,16 @@ async def ai_last_session(tg_id: int):
         (tg_id,), fetch="one")
 
 
-async def events_count_recent(tg_id: int, event: str, hours: int = 48) -> int:
-    """Сколько событий event у юзера за последние N часов (лимиты повторов). Крэш-сейф."""
+async def events_count_recent(tg_id: int, event: str, hours: int = 48,
+                              minutes: int | None = None) -> int:
+    """Сколько событий event у юзера за последние N часов (лимиты повторов). Крэш-сейф.
+    minutes задан → окно в минутах (щиты мельче часа, напр. повтор оффера)."""
     try:
+        window = (f"-{int(minutes)} minutes" if minutes is not None
+                  else f"-{int(hours)} hours")
         row = await _exec(
             "SELECT COUNT(*) AS n FROM funnel_events WHERE tg_id = ? AND event = ? "
-            f"AND datetime(created_at) > datetime('now', '-{int(hours)} hours')",
+            f"AND datetime(created_at) > datetime('now', '{window}')",
             (tg_id, event), fetch="one")
         return int((row or {}).get("n") or 0)
     except Exception:

@@ -198,6 +198,57 @@ def _bridge_kbd() -> InlineKeyboardMarkup:
     ])
 
 
+def _offer_kbd() -> InlineKeyboardMarkup:
+    """Волна 1: карточка оффера — три двери (Клуб / 1:1 / разбор «подробнее»).
+    Идёт и с тизером (кнопка сразу), и с карточкой после кружка — надёжный путь."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Клуб «Манифест» · 990 ₽/мес", url=CLUB_URL)],
+        [InlineKeyboardButton(text="Личная работа со мной · 1:1", url=ONE_ON_ONE_URL)],
+        [InlineKeyboardButton(text="Сначала расскажи подробнее", callback_data="alena:more")],
+    ])
+
+
+def _member_offer_kbd() -> InlineKeyboardMarkup:
+    """То же для члена Клуба: он уже внутри → без двери Клуба, только 1:1 + разбор."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Личная работа со мной · 1:1", url=ONE_ON_ONE_URL)],
+        [InlineKeyboardButton(text="Сначала расскажи подробнее", callback_data="alena:more")],
+    ])
+
+
+def _request_from_cm(cm: dict | None) -> str | None:
+    """Волна 1: реконструкция запроса из модели клиентки, когда закрытие пришло
+    БЕЗ маркера [[ЗАПРОС]] (жёсткие доводки: TURN_CAP, «да» на мост). ТОЛЬКО
+    вскрытый настоящий запрос: facade_lie не берём — это её защита-ложь (ярлык
+    в 3-м лице), подать её как «вскрытую боль» = инверсия смысла (аудит W1 #1).
+    Пусто → None (уйдёт в мягкую ветку без цитаты). Чистая, тестируемая."""
+    request = ((cm or {}).get("true_request_hypothesis") or "").strip()
+    return request or None
+
+
+def _should_binary_close(otype: str | None, readiness: float | None) -> bool:
+    """Волна 1, Шаг 10: бинарный дожим уместен, только если сомнение — «подумаю»
+    И готовность к офферу уже высокая (≥0.6). Иначе — обычная отработка. Чистая."""
+    try:
+        r = float(readiness) if readiness is not None else 0.0
+    except (TypeError, ValueError):
+        r = 0.0
+    return otype == "think" and r >= 0.6
+
+
+async def _after_offer_kbd(user_id: int, u_row: dict | None) -> InlineKeyboardMarkup:
+    """Сегментная клавиатура отработки/дожима: горячим/глубоким — обе двери,
+    иначе один Клуб-CTA (совещание 04.07). Крэш-сейф → Клуб."""
+    try:
+        if ((u_row or {}).get("lead_track") == "T4"
+                or await events_count_recent(user_id, "lead_hot_kw", 48) > 0
+                or await events_count_recent(user_id, "depth_intent", 48) > 0):
+            return _bridge_kbd()
+    except Exception:
+        pass
+    return _club_only_kbd()
+
+
 _EXHAUSTED_TEXT = (
     "Бесплатная встреча у нас уже была — вторых не даю.\n\n"
     "Хочешь продолжать со мной — это Клуб «Манифест»: две такие встречи, как эта, каждый "
@@ -515,8 +566,10 @@ async def cb_first_step(callback: CallbackQuery):
         except (ValueError, IndexError):
             text = None
     elif parts[1] == "f0":
-        await callback.message.answer("Я слушаю. Скажи, как есть — текстом или голосовым 🎙",
-                                      parse_mode=None)
+        await callback.message.answer(
+            "Хорошо — тогда веди ты. С чего острее: что давит на тебя снаружи или "
+            "что грызёт изнутри? Говори голосом или пиши буквами — как ляжет.",
+            parse_mode=None)
         return
     else:                                          # легаси alena:f1..f3
         text = _FIRST_STEPS.get(parts[1])
@@ -532,6 +585,35 @@ async def cb_first_step(callback: CallbackQuery):
         return
     await callback.message.answer(f"— {text}", parse_mode=None)
     await _talk(callback.message, text, user_override=callback.from_user)
+
+
+# Волна 1: «Сначала расскажи подробнее» под карточкой оффера → короткий разбор,
+# чем разнятся Клуб и 1:1 (текст №4, tone-gate), + повтор той же клавиатуры сегмента.
+_OFFER_MORE_TEXT = (
+    "Расскажу без прикрас. Клуб — это ритм: каждое утро тебе приходит «Манифест "
+    "дня», пять минут, чтобы не проснуться в старой яме. Дважды в месяц садимся "
+    "лицом к лицу. И всё время рядом женщины, при которых можно снять броню. "
+    "Девятьсот девяносто рублей. Личная работа — другое: только ты и я, никакого "
+    "зала. Час — семь тысяч, три встречи разом — восемнадцать. Там идём в самую "
+    "глубину твоего. Что тянет сильнее — тёплый круг или только мы вдвоём?")
+
+
+@alena_router.callback_query(F.data == "alena:more")
+async def cb_offer_more(callback: CallbackQuery):
+    """Разбор «что входит» + повтор клавиатуры сегмента. Жать можно сколько угодно,
+    но сам текст №4 повторяем не чаще 1×/10 мин (щит от спама, клавиатура — всегда)."""
+    await callback.answer()
+    uid = callback.from_user.id
+    kbd = _member_offer_kbd() if await _is_club_member(uid) else _offer_kbd()
+    try:
+        shown_recently = await events_count_recent(uid, "offer_more", minutes=10) > 0
+    except Exception:
+        shown_recently = False
+    if shown_recently:
+        return   # уже показывали недавно — не дублируем, кнопки на карточке живы
+    if not await _send_alive(callback.message, _OFFER_MORE_TEXT, kbd):
+        await callback.message.answer(_OFFER_MORE_TEXT, parse_mode=None, reply_markup=kbd)
+    await log_event(uid, "offer_more")
 
 
 # ── Вход ──────────────────────────────────────────────────────────────────────
@@ -908,8 +990,10 @@ async def on_alena_talk(message: Message):
         # про «не удалось открыть» — встреча жива, просто просим повторить.
         logger.exception("on_alena_talk failed for %s", message.from_user.id)
         try:
-            await message.answer("Я здесь, напиши ещё раз — я всё слышу.",
-                                 parse_mode=None)
+            await message.answer(
+                "Ой, меня на секунду тут заело — не с тобой, а с проводами. Скажи "
+                "это ещё разок, я уже здесь и слушаю.",
+                parse_mode=None)
         except Exception:
             pass
 
@@ -1409,6 +1493,25 @@ async def on_after_offer(message: Message):
         obj_count = 1
     u = await get_user(user.id)
     request = (u or {}).get("last_ai_request") or ""
+    # Волна 1, Шаг 10: «подумаю» при уже высокой готовности (offer_readiness≥0.6) →
+    # не размазываем директиву, а бьём бинарным дожимом: выбор только КАК (текст №5,
+    # дословно, голосом; фолбэк текст) + клавиатура сегмента.
+    try:
+        _readiness = ((await get_client_model(user.id)) or {}).get("offer_readiness")
+    except Exception:
+        _readiness = None
+    if _should_binary_close(otype, _readiness):
+        binary = (
+            "Смотри. Вопрос сейчас не «идти или нет» — это ты уже решила одним: ты "
+            "всё ещё здесь. Остаётся только КАК. Мягко и вместе — Клуб, где каждый "
+            "день чувствуешь плечо. Или сразу вглубь, наедине, где я берусь за то "
+            "самое, что болит. Куда ступить — в круг или ко мне вплотную? Обе двери "
+            "ждут ниже.")
+        kbd = await _after_offer_kbd(user.id, u)
+        await log_event(user.id, "binary_close")
+        if not await send_voice_reply(message, binary, kbd):
+            await message.answer(binary, parse_mode=None, reply_markup=kbd)
+        return
     last = await ai_last_session(user.id)
     history = await ai_get_messages((last or {}).get("id"), HISTORY_LIMIT) or []
     history = history + [{"role": "user", "content": message.text}]
@@ -1444,14 +1547,7 @@ async def on_after_offer(message: Message):
     # Совещание 04.07: рассинхрон сегмента — горячей/глубокой ветке оффер давал
     # обе двери (_bridge_kbd), а отработка возражения схлопывала до одного Клуба,
     # теряя дверь 1:1. Держим сегментную клавиатуру и здесь (крэш-сейф).
-    kbd = _club_only_kbd()
-    try:
-        if ((u or {}).get("lead_track") == "T4"
-                or await events_count_recent(user.id, "lead_hot_kw", 48) > 0
-                or await events_count_recent(user.id, "depth_intent", 48) > 0):
-            kbd = _bridge_kbd()
-    except Exception:
-        pass
+    kbd = await _after_offer_kbd(user.id, u)
     if not await send_voice_reply(message, reply, kbd):
         await message.answer(reply, parse_mode=None, reply_markup=kbd)
 
@@ -1462,19 +1558,22 @@ async def on_after_offer(message: Message):
 # тёплый нудж с дверью в Клуб. Встреча остаётся открытой — можно ответить дальше.
 _STALE_NUDGE_TEXT = (
     "Ты затихла — и это нормально. Иногда то, что мы задели, нужно донести молча.\n\n"
-    "Я не тороплю и не исчезаю. Захочешь продолжить — просто напиши, я здесь.\n\n"
     "А если почувствуешь, что не хочешь оставаться с этим одна — я рядом каждый "
     "день в Клубе «Манифест»: две наши встречи в месяц, утреннее аудио, живой эфир раз в неделю, закрытый чат. "
-    "990 в месяц, чтобы не разбираться в одиночку.\n\n— Алёна"
+    "990 в месяц, чтобы не разбираться в одиночку.\n\n"
+    "Решать сейчас необязательно. Можно шагнуть дальше прямо в эту минуту — а можно "
+    "побыть с тем, что поднялось, и вернуться позже, когда согреешься. Я никуда не "
+    "денусь ни в том, ни в другом.\n\n— Алёна"
 )
 
-# Тот же нудж устной речью (для TTS): без переносов-подписи, «дверь ниже».
+# Тот же нудж устной речью (для TTS): без переносов-подписи, бережная вилка-финал.
 _STALE_NUDGE_VOICE = (
     "Ты затихла — и это нормально. Иногда то, что мы задели, нужно донести молча. "
-    "Я не тороплю и не исчезаю. Захочешь продолжить — просто напиши, я здесь. "
     "А если почувствуешь, что не хочешь оставаться с этим одна — я рядом каждый "
     "день в Клубе «Манифест»: две наши встречи в месяц, утреннее аудио, живой эфир раз в неделю, закрытый чат. "
-    "Дверь — под этим сообщением."
+    "Решать сейчас необязательно. Можно шагнуть дальше прямо в эту минуту — а можно "
+    "побыть с тем, что поднялось, и вернуться позже, когда согреешься. Я никуда не "
+    "денусь ни в том, ни в другом."
 )
 
 
@@ -1603,6 +1702,66 @@ async def _schedule_followups(tg_id: int):
         await followup_schedule(tg_id, _followup_delays())
 
 
+# ── Волна 1: тексты оффер-механики (tone-gate Алёны, эталон funnel-texts-wave12) ──
+# Тизер перед кружком (текст №1): идёт голосом ВО ВСЕХ сегментах, кнопка сегмента
+# прикреплена сразу (мандат Кая: «кнопки — карточкой сразу за кружком, надёжный путь»).
+_OFFER_TEASER = (
+    "Погоди — самое важное я скажу тебе в лицо, не буквами: дай пару минут, запишу "
+    "это для тебя одной. А внизу уже ждёт то, куда можно шагнуть дальше.")
+
+# Карточка под кружком (текст №3): текст над кнопками оффера.
+_OFFER_CARD = (
+    "Выбор за тобой — вот три двери. Тронь ту, что ближе; захочешь понять, чем они "
+    "разнятся, — жми «расскажи подробнее».")
+
+# Карточка члену Клуба: у него две кнопки (Клуба нет — он уже внутри), «три двери»
+# были бы враньём (флаг исполнителя Волны 1, правка продюсера через tone-правила).
+_MEMBER_OFFER_CARD = (
+    "Эта дверь — только про тебя. Шагни, когда откликнется; а если хочешь сначала "
+    "разобраться, как всё устроено, — жми «расскажи подробнее».")
+
+# Скрипт оффер-кружка члену Клуба (текст №8в): мост в 1:1, вход = одна пробная встреча.
+_MEMBER_KRUZHOK_SCRIPT = (
+    "Ты давно в кругу, и я вижу — одна тема у тебя переросла общий формат, ей тесно "
+    "среди многих. Такое доразбирают наедине: только ты и я, час целиком на тебя. Не "
+    "надо решаться на цикл сразу — возьми первую встречу, пробную, и почувствуй, "
+    "твоё ли. Кнопка записи ниже.")
+
+
+def _default_kruzhok_script(name: str | None, q: str) -> str:
+    """Скрипт оффер-кружка дефолт-ветки (текст №2): {Имя}/«{запрос}» подставлены."""
+    head = f"{name}, послушай меня." if name else "Послушай меня."
+    return (
+        f"{head} То, что сегодня поднялось со дна, — «{q}» — за один разговор мы это "
+        "только увидели. Чтобы оно сдвинулось, к нему возвращаются снова и снова, "
+        "бережно, а не рывком. Со мной это делают двумя путями. Первый — Клуб "
+        "«Манифест», девятьсот девяносто в месяц: две встречи, как эта, каждое утро "
+        "короткая опора от меня и женщины рядом, которым не надо ничего объяснять. "
+        "Второй — работа только про тебя, наедине, где я веду тебя глубже, чем "
+        "получается на людях. Что тянет сильнее — быть среди своих или сесть со мной "
+        "с глазу на глаз? Обе двери прямо под этим видео.")
+
+
+def _flagship_kruzhok_script(q: str) -> str:
+    """T4/hot: существующий боевой оффер-флагман 1:1 как скрипт кружка (без правок)."""
+    return (
+        f"«{q}» — с этим не в переписку, и ты сама это чувствуешь. Такое не отражают "
+        "в чате — это проживают: медленно, один на один, пока не отпустит. Скажу "
+        "прямо: возьми свой запрос в личную работу со мной — встречи наедине, где "
+        "есть только ты и он. А если сначала мягче — рядом Клуб, где можно просто "
+        "побыть в кругу. Сомневаешься или есть вопрос — напиши, отвечу честно. Обе "
+        "двери — под этим сообщением.")
+
+
+def _depth_kruzhok_script(q: str) -> str:
+    """depth_intent: существующий боевой depth-оффер как скрипт кружка (без правок)."""
+    return (
+        f"«{q}» — и ты сама потянулась глубже. Услышала. То, что просит изнутри, "
+        "перепиской не закрыть — для такого есть живые встречи наедине, только про "
+        "тебя. Входить постепенно — рядом Клуб: круг, эфиры, моя ежедневная опора. "
+        "Что останавливает — спроси прямо здесь, я на связи. Обе двери — ниже.")
+
+
 _OFFER_FALLBACK_TEXT = (
     "В Клубе «Манифест» продолжим ровно с этого места: две встречи со мной в месяц, каждое утро — моё аудио "
     "«Манифест дня», раз в неделю — живой эфир, и круг женщин в закрытом чате, "
@@ -1611,29 +1770,16 @@ _OFFER_FALLBACK_TEXT = (
 
 
 async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
-                         name: str | None, request: str):
-    """Ф2 (мандат Кая 02.07): САМ ОФФЕР Клуба = именной видео-кружок Алёны.
+                         script: str, kbd: InlineKeyboardMarkup,
+                         card: str = _OFFER_CARD,
+                         fallback: str = _OFFER_FALLBACK_TEXT):
+    """Ф2 (мандат Кая 02.07): САМ ОФФЕР = именной видео-кружок Алёны.
 
-    Рендер твина ~2–4 мин → идёт фоном после тизера «записываю тебе кружок».
-    Кнопка оплаты приходит ВМЕСТЕ с кружком. Сбой рендера → страховка: оффер
-    текстом с кнопкой — продажа не теряется никогда."""
-    q = request.strip().rstrip(".")[:140]
+    Волна 1: скрипт и клавиатура сегментные — их задаёт _after_close (дефолт/член/
+    T4/depth). Рендер твина ~2–4 мин → идёт фоном после тизера. После кружка —
+    карточка №3 с кнопками (надёжный путь). Сбой рендера → страховка: оффер голосом,
+    дальше текстом, с ТОЙ ЖЕ клавиатурой — продажа не теряется никогда."""
     try:
-        who = f"{name}, послушай" if name else "Послушай"
-        # ⚠️ Без слова «кружок» в озвучке (TTS читает «крУжком» — фидбек Кая 03.07).
-        # Совещание 04.07 (мандат Кая: мост боль→механизм + приглашение к
-        # вопросам): каждый элемент Клуба привязан к функции под ЕЁ запрос,
-        # финал зовёт спросить — это поджигает уже готовую ветку возражений.
-        script = (f"{who}. То, что сегодня вскрылось — «{q}» — это твоя настоящая "
-                  "точка. Один разговор её показал, но чтобы она поменялась, к "
-                  "ней нужно возвращаться — не наскоком. Для этого и есть Клуб. "
-                  "Наши встречи внутри — разматываем твой узор шаг за шагом. По "
-                  "утрам тебя держит мой «Манифест дня», пять минут опоры. Раз в "
-                  "неделю эфир, где я разбираю вживую — можно и про твоё. А в "
-                  "закрытом кругу рядом женщины с похожим — ты больше не тащишь "
-                  "это одна. Если что-то мешает или хочешь спросить — просто "
-                  "ответь мне сюда, я на связи. Готова продолжить — дверь прямо "
-                  "под этим видео.")
         await add_circle_credits(tg_id, CIRCLE_CREDITS)  # леджер ДО рендера (антидубль)
         # Индикатор жизни на время рендера твина (2–4 мин): фоновый chat_action,
         # чтобы клиентка не видела глухую тишину (аудит воронки 06.07).
@@ -1650,21 +1796,22 @@ async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
         if sent:
             await log_event(tg_id, "offer_kruzhok", "sent")
             await bot.send_message(
-                chat_id, "Это тебе. Лично.\n\nВойти — здесь:",
-                reply_markup=_club_only_kbd(), parse_mode=None)
+                chat_id, card, reply_markup=kbd, parse_mode=None)
             return
     except Exception:
         logger.warning("offer kruzhok failed (fallback text)", exc_info=True)
     # Страховка: кружок не собрался → оффер голосом (сбой видео ≠ сбой TTS),
     # дальше текстом — кнопка обязана дойти в любом случае.
     try:
-        spoken = " ".join(_OFFER_FALLBACK_TEXT.replace("— Алёна", "").split())
-        if await send_voice_to(bot, chat_id, spoken, _club_only_kbd()):
+        # Фолбэк сегментный (аудит W1 #2): члену Клуба нельзя питчить Клуб без
+        # кнопки Клуба — его fallback = мост в 1:1 (передаётся из _after_close).
+        spoken = " ".join(fallback.replace("— Алёна", "").split())
+        if await send_voice_to(bot, chat_id, spoken, kbd):
             await log_event(tg_id, "offer_kruzhok", "fallback_voice")
             return
         await log_event(tg_id, "offer_kruzhok", "fallback_text")
-        await bot.send_message(chat_id, _OFFER_FALLBACK_TEXT,
-                               reply_markup=_club_only_kbd(), parse_mode=None)
+        await bot.send_message(chat_id, fallback,
+                               reply_markup=kbd, parse_mode=None)
         return
     except Exception:
         logger.warning("offer fallback send failed", exc_info=True)
@@ -1710,99 +1857,57 @@ async def _after_close(message: Message, user, request: str | None = None):
     # безлимит встреч у него остаётся).
     is_member = await _is_club_member(user.id)
 
-    # Вскрылся настоящий запрос → ведём дальше. Куда именно — по сегменту.
-    # Мандат Кая 03.07: офферы — ГОЛОСОМ (это её речь), кнопка на голосовом;
-    # сбой TTS → тот же текст с кнопкой, продажа не теряется.
+    # Волна 1: закрытие могло прийти БЕЗ маркера [[ЗАПРОС]] (жёсткие доводки —
+    # TURN_CAP, «да» на мост) → request пуст, оффер-кружок раньше проваливался.
+    # Реконструируем запрос из модели клиентки (настоящий → фасад), чтобы
+    # кружок-оффер собрался всегда.
+    if not request:
+        cm = await get_client_model(user.id) or {}
+        request = _request_from_cm(cm)
+
+    # Вскрылся (или реконструирован) настоящий запрос → ведём дальше. Волна 1:
+    # ВСЕ сегменты получают именной оффер-кружок. Схема одна: (а) тизер №1 голосом
+    # с прикреплённой клавиатурой сегмента → (б) фоновый рендер кружка сегментным
+    # скриптом → (в) карточка №3 с кнопками после кружка (надёжный путь, мандат Кая).
     if request:
-        q = request.strip().rstrip(".")
-        if is_member:
-            # Член Клуба → тёплый докрут в 1:1 (я тебя уже знаю).
-            await log_event(user.id, "offer_shown", "bridge_1on1")
-            # Методолог №2 (2а): закрытие уже назвало запрос — оффер не пере-
-            # представляет его заново, а сразу ведёт дальше.
-            bridge = (
-                f"«{q}» — вот с чем ты пришла на самом деле. Увидеть — уже "
-                "много, но не всё: прожить и поменять такое в переписке не "
-                "выходит. Это работа для живой встречи, один на один. "
-                "Если что-то ещё держит — "
-                "просто напиши мне, отвечу как есть. Готова — дверь под этим "
-                "сообщением: после оплаты я открою тебе запись прямо здесь, в "
-                "чате, выберешь удобное время — и продолжим ровно с этого места.")
-            if await send_voice_reply(message, bridge, _bridge_kbd()):
-                await log_event(user.id, "voice_reply", "offer_bridge")
-            else:
-                await message.answer(bridge + "\n\n— Алёна",
-                                     reply_markup=_bridge_kbd(), parse_mode=None)
-            return
-        # Адаптивный порядок офферов (Кай 02.07): ГОРЯЧЕЙ (трек T4 — готова к шагу)
-        # первым предлагаем ФЛАГМАН 1:1, Клуб — рядом второй строкой. Остальным —
-        # Клуб (трипваер). Рынок: AI слабо закрывает высокий чек холодным, поэтому
-        # 1:1-первым только по скорингу готовности.
-        u_row = await get_user(user.id)
-        # Совещание 1:1 (03.07): T4-ветка больше НЕ зависит от мозга — keyword-
-        # фолбэк готовности (lead_hot_kw) включает флагман и при лежащем скоринге.
-        hot_kw = (await events_count_recent(user.id, "lead_hot_kw", 48)) > 0
-        if (u_row or {}).get("lead_track") == "T4" or hot_kw:
-            await log_event(user.id, "offer_shown",
-                            "flagship_1on1_kw" if hot_kw else "flagship_1on1_T4")
-            # Совещание 04.07: почему 1:1 (механизм), а не перечень Клуба +
-            # приглашение спросить (вскрывает возражения само).
-            flagship = (
-                f"«{q}» — с этим не в переписку, и ты сама это чувствуешь. "
-                "Такое не отражают в чате — это проживают: медленно, один на "
-                "один, пока не отпустит. Скажу прямо: возьми свой запрос в "
-                "личную работу со мной — встречи наедине, где есть только ты и "
-                "он. А если сначала мягче — рядом Клуб, где "
-                "можно просто побыть в кругу. Сомневаешься или есть вопрос — "
-                "напиши, отвечу честно. Обе двери — под этим сообщением.")
-            if await send_voice_reply(message, flagship, _bridge_kbd()):
-                await log_event(user.id, "voice_reply", "offer_flagship")
-            else:
-                await message.answer(flagship + "\n\n— Алёна",
-                                     reply_markup=_bridge_kbd(), parse_mode=None)
-            await _nudge_channel(message, user)
-            await _schedule_followups(user.id)
-            return
-        # Совещание 1:1 (03.07), pull-триггер: она САМА просила «глубже/лично» в
-        # сессии (depth_intent) → дверь 1:1 + Клуб мягкой альтернативой. Дефолт
-        # для остальных не трогаем (один Клуб-CTA на пике).
-        if (await events_count_recent(user.id, "depth_intent", 48)) > 0:
-            await log_event(user.id, "offer_shown", "depth_1on1")
-            # Совещание 04.07: разведено с flagship по корням (ПРАВИЛО №1).
-            depth = (
-                f"«{q}» — и ты сама потянулась глубже. Услышала. То, что просит "
-                "изнутри, перепиской не закрыть — для такого есть живые встречи "
-                "наедине, только про тебя. Входить "
-                "постепенно — рядом Клуб: круг, эфиры, моя ежедневная опора. "
-                "Что останавливает — спроси прямо здесь, я на связи. Обе "
-                "двери — ниже.")
-            if await send_voice_reply(message, depth, _bridge_kbd()):
-                await log_event(user.id, "voice_reply", "offer_depth")
-            else:
-                await message.answer(depth + "\n\n— Алёна",
-                                     reply_markup=_bridge_kbd(), parse_mode=None)
-            await _nudge_channel(message, user)
-            await _schedule_followups(user.id)
-            return
-        # Бесплатная встреча исчерпана → оффер Клуба = ИМЕННОЙ КРУЖОК (мандат Кая:
-        # «кружочки в начале и в конце, остальное голосом»). Схема: тизер голосом
-        # («записываю тебе кружок») → фоновый рендер твина ~2–4 мин → кружок с именем
-        # и её запросом + кнопка. Сбой рендера → страховка текстом с кнопкой.
-        await log_event(user.id, "offer_shown", "club_request")
-        # ⚠️ Без слова «кружок» в озвучке (кривое ударение TTS — фидбек Кая 03.07).
-        # Аудит №8: честный тайминг (рендер твина 2–4 мин, не «пару минут»).
-        # Методолог 03.07: без повтора «{q}» (закрывающий ход его уже назвал) и с
-        # честным таймингом (рендер твина 2–4 мин).
-        teaser = ("Постой — это ещё не всё. То, что не передать текстом, я "
-                  "записываю тебе на видео — лично. Несколько минут, и оно "
-                  "у тебя.")
-        if not await send_voice_reply(message, teaser):
-            await message.answer(teaser, parse_mode=None)
+        q = request.strip().rstrip(".")[:140]
         _name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
+        if is_member:
+            # Член Клуба → мост в 1:1 (текст №8в), без двери Клуба (он уже внутри).
+            await log_event(user.id, "offer_shown", "bridge_1on1")
+            script = _MEMBER_KRUZHOK_SCRIPT
+            kbd = _member_offer_kbd()
+            card = _MEMBER_OFFER_CARD
+            fallback = _MEMBER_KRUZHOK_SCRIPT  # сбой кружка → тот же мост в 1:1 текстом/голосом
+        else:
+            # Адаптивный порядок (Кай 02.07): ГОРЯЧЕЙ (трек T4 / lead_hot_kw) — скрипт
+            # флагмана 1:1; сама тянулась глубже (depth_intent) — depth-скрипт; иначе
+            # дефолт (текст №2). Скрипты флагмана/depth = боевые формулировки без правок.
+            u_row = await get_user(user.id)
+            hot_kw = (await events_count_recent(user.id, "lead_hot_kw", 48)) > 0
+            if (u_row or {}).get("lead_track") == "T4" or hot_kw:
+                await log_event(user.id, "offer_shown",
+                                "flagship_1on1_kw" if hot_kw else "flagship_1on1_T4")
+                script = _flagship_kruzhok_script(q)
+            elif (await events_count_recent(user.id, "depth_intent", 48)) > 0:
+                await log_event(user.id, "offer_shown", "depth_1on1")
+                script = _depth_kruzhok_script(q)
+            else:
+                await log_event(user.id, "offer_shown", "club_request")
+                script = _default_kruzhok_script(_name, q)
+            kbd = _offer_kbd()
+            card = _OFFER_CARD
+            fallback = _OFFER_FALLBACK_TEXT
+        # (а) тизер №1 голосом + клавиатура сегмента (кнопка уже с тизером — мандат Кая).
+        if not await send_voice_reply(message, _OFFER_TEASER, kbd):
+            await message.answer(_OFFER_TEASER, parse_mode=None, reply_markup=kbd)
+        # (б) оффер-кружок сегментным скриптом → (в) карточка сегмента + kbd (внутри).
         asyncio.create_task(_offer_kruzhok(
-            message.bot, message.chat.id, user.id, _name, q))
-        await _nudge_channel(message, user)
-        await _schedule_followups(user.id)
+            message.bot, message.chat.id, user.id, script, kbd, card, fallback))
+        # Нудж канала/дожим — как раньше, только не члену (он уже внутри Клуба).
+        if not is_member:
+            await _nudge_channel(message, user)
+            await _schedule_followups(user.id)
         return
 
     # Запроса не вскрылось / ей хватило — честно, без втюхивания.

@@ -17,7 +17,11 @@ from alena_persona import (
     OBJECTION_CAP, OBJECTION_TYPES, _OBJECTION_DIRECTIVE,
 )
 from alena_brain import _default_diagnosis, _valid_reply
-from alena_chat import _last_question, _ensure_reply, _EMPTY_REPLY_STUB
+from alena_chat import (
+    _last_question, _ensure_reply, _EMPTY_REPLY_STUB,
+    _should_binary_close, _offer_kbd, _member_offer_kbd, _request_from_cm,
+    CLUB_URL, ONE_ON_ONE_URL,
+)
 
 
 # ── Механизм 3: маппинг фаза → шаг воронки (1..12) ────────────────────────────
@@ -180,6 +184,62 @@ def test_ensure_reply():
     assert _ensure_reply("Я тебя услышала.") == "Я тебя услышала."
 
 
+# ── Волна 1: бинарный дожим Шага 10 — только «подумаю» И готовность ≥0.6 ───────
+def test_should_binary_close():
+    # «подумаю» при высокой готовности → дожим
+    assert _should_binary_close("think", 0.6) is True, "порог 0.6 включительно"
+    assert _should_binary_close("think", 0.75) is True
+    assert _should_binary_close("think", 1.0) is True
+    assert _should_binary_close("think", "0.7") is True, "числовая строка парсится"
+    # граница снизу и низкая готовность → без дожима
+    assert _should_binary_close("think", 0.59) is False
+    assert _should_binary_close("think", 0.0) is False
+    assert _should_binary_close("think", None) is False
+    assert _should_binary_close("think", "мусор") is False
+    # чужие типы возражений → никогда не дожим (даже при высокой готовности)
+    for other in ("price", "time", "trust", "other", None):
+        assert _should_binary_close(other, 0.9) is False, other
+
+
+# ── Волна 1: клавиатуры оффера — состав кнопок и URL ──────────────────────────
+def test_offer_kbd():
+    rows = _offer_kbd().inline_keyboard
+    assert len(rows) == 3, "три двери"
+    assert rows[0][0].url == CLUB_URL and "990" in rows[0][0].text
+    assert rows[1][0].url == ONE_ON_ONE_URL and "1:1" in rows[1][0].text
+    assert rows[2][0].callback_data == "alena:more"
+    assert rows[2][0].url is None
+
+
+def test_member_offer_kbd():
+    rows = _member_offer_kbd().inline_keyboard
+    assert len(rows) == 2, "член Клуба уже внутри → без двери Клуба"
+    urls = [b.url for row in rows for b in row]
+    assert CLUB_URL not in urls, "кнопки Клуба быть не должно"
+    assert ONE_ON_ONE_URL in urls, "1:1 остаётся"
+    cbs = [b.callback_data for row in rows for b in row]
+    assert "alena:more" in cbs, "разбор «подробнее» остаётся"
+
+
+# ── Волна 1: реконструкция запроса из модели клиентки ─────────────────────────
+def test_request_from_cm():
+    # берём ТОЛЬКО вскрытый настоящий запрос
+    assert _request_from_cm(
+        {"true_request_hypothesis": "боюсь близости", "facade_lie": "всё норм"}
+    ) == "боюсь близости"
+    # фасад-ложь НЕ подставляем (аудит W1 #1: это защита в 3-м лице, выдать её
+    # за «вскрытую боль» = инверсия смысла) → None → мягкая ветка без цитаты
+    assert _request_from_cm(
+        {"true_request_hypothesis": "", "facade_lie": "всё норм"}) is None
+    assert _request_from_cm({"facade_lie": "всё норм"}) is None
+    # обрезаем пробелы
+    assert _request_from_cm({"true_request_hypothesis": "  тревога  "}) == "тревога"
+    # пусто/None/только пробелы → None (кружок не соберём из пустого)
+    assert _request_from_cm({}) is None
+    assert _request_from_cm(None) is None
+    assert _request_from_cm({"true_request_hypothesis": "   "}) is None
+
+
 if __name__ == "__main__":
     test_method_phase_to_step()
     test_clamp_readiness()
@@ -190,6 +250,11 @@ if __name__ == "__main__":
     test_valid_reply()
     test_last_question_fallback()
     test_ensure_reply()
+    test_should_binary_close()
+    test_offer_kbd()
+    test_member_offer_kbd()
+    test_request_from_cm()
     print("OK: funnel_step map + offer_readiness clamp + [[PHASE]] strip + "
           "objection classifier (5 типов) + cap 3 soft-exit + "
-          "_valid_reply + _last_question fallback + _ensure_reply")
+          "_valid_reply + _last_question fallback + _ensure_reply + "
+          "binary_close + offer_kbd/member_offer_kbd + request_from_cm")
