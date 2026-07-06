@@ -29,7 +29,7 @@ import logging
 import brain_cascade
 from alena_persona import (
     build_diagnose_prompt, build_response_prompt, parse_diagnose_json,
-    static_safe_reply, METHOD_PHASES,
+    static_safe_reply, METHOD_PHASES, method_phase_to_step, clamp_readiness,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,8 @@ _SAFE_DIRECTIVE = {
     "client_model": {},
     "score": {},
     "method_phase": METHOD_PHASES[0],   # contact
+    "funnel_step": method_phase_to_step(METHOD_PHASES[0]),  # 2 (шаг воронки для contact)
+    "offer_readiness": 0.0,             # готовность к офферу 0..1 (копится по ходу)
     "directive": "будь рядом, слушай, веди мягко",
     "medium": "text",
     "track": "T2",
@@ -120,6 +122,18 @@ async def diagnose(history: list[dict], name, archetype,
         out["medium"] = data["medium"]
     if isinstance(data.get("track"), str) and data["track"].strip():
         out["track"] = data["track"].strip()
+    # Готовность к офферу (0..1): копится по ходу, кормит следующий диагноз
+    # (модель видит свою прошлую оценку — «не гадает заново»). Мусор → 0.0.
+    out["offer_readiness"] = clamp_readiness(data.get("offer_readiness"))
+    # Шаг воронки (1..12): берём валидный из модели, иначе выводим из фазы метода
+    # (единый источник — маппинг method_phase_to_step, чтобы шаг не расходился с фазой).
+    fs = data.get("funnel_step")
+    if isinstance(fs, bool):
+        fs = None
+    if isinstance(fs, (int, float)) and 1 <= int(fs) <= 12:
+        out["funnel_step"] = int(fs)
+    else:
+        out["funnel_step"] = method_phase_to_step(out["method_phase"])
     return out
 
 
@@ -194,6 +208,11 @@ async def brain_turn(history: list[dict], name, archetype,
         cm.update(new_cm)
     cm["method_phase"] = dx.get("method_phase")
     cm["track"] = dx.get("track")
+    # Явный шаг воронки (1..12) и готовность к офферу (0..1) — часть структурного
+    # диагноза: хранятся в состоянии (client_model), кормят следующий ход диагноза
+    # (континуитет «не гадаем заново») и доступны /sources как топливо конверсии.
+    cm["funnel_step"] = dx.get("funnel_step")
+    cm["offer_readiness"] = dx.get("offer_readiness")
     # Директива канала ответа (H1): "voice" → _talk шлёт голосовым Алёны.
     # Едет внутри cm, чтобы не менять сигнатуру brain_turn.
     cm["medium"] = "voice" if voice_out else "text"
