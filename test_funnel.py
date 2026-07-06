@@ -68,6 +68,11 @@ def test_extract_phase():
     # регистр/пробелы гибкие
     _, ph2 = extract_phase("текст [[ PHASE: Give_Shift ]]")
     assert ph2 == "give_shift"
+    # числовая форма [[PHASE:6]] тоже вырезается (защита от утечки в TTS)
+    clean3, ph3 = extract_phase("Разберём это. [[PHASE:6]]")
+    assert "[[" not in clean3 and "PHASE" not in clean3, clean3
+    assert clean3 == "Разберём это."
+    assert ph3 == "6"
     # нет маркера → (текст, None), текст не тронут
     assert extract_phase("просто живая реплика без служебки") == (
         "просто живая реплика без служебки", None)

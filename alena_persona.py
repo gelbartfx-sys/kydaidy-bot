@@ -47,7 +47,7 @@ _DANGLING_MARKER_RE = re.compile(r"\[\[(?:(?!\]\]).)*$", re.DOTALL)
 # структурном диагнозе (client_model.method_phase / funnel_step), но если модель
 # всё же впишет [[PHASE:xxx]] в живой текст — этот стриппер вырежет его ДО TTS,
 # чтобы служебка не утекла человеку (полный закрытый маркер score/request не ловит).
-PHASE_RE = re.compile(r"\[\[\s*PHASE:\s*([a-z_]+)\s*\]\]", re.IGNORECASE)
+PHASE_RE = re.compile(r"\[\[\s*PHASE:\s*([a-z0-9_]+)\s*\]\]", re.IGNORECASE)
 
 
 def strip_dangling_markers(text: str) -> str:
