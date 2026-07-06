@@ -34,7 +34,8 @@ from database import (
     ai_open_session, ai_add_message, ai_get_messages, ai_bump_turns,
     ai_close_session, ai_close_all_active, ai_session_idle_minutes,
     ai_set_last_request, save_dossier,
-    ai_stale_sessions, ai_orphan_sessions, ai_mark_nudged, save_lead_signals, set_lead_track,
+    ai_stale_sessions, ai_orphan_sessions, ai_dead_sessions,
+    ai_mark_nudged, save_lead_signals, set_lead_track,
     get_client_model, save_client_model, get_meta,
     log_event, followup_schedule, get_lead_signals, add_circle_credits,
     ai_last_session, events_count_recent, club_ladder_candidates,
@@ -55,6 +56,13 @@ alena_router = Router()
 
 FREE_SESSIONS = 1          # бесплатных встреч на человека (пожизненно)
 CLUB_MONTHLY_SESSIONS = 2  # встреч с AI-Алёной в месяц для членов Клуба (мандат Кая 03.07)
+
+# Волна 1 + батч Б: единый мягкий фолбэк, когда ход клиентки упал в обработке
+# (сбой _talk внутри голоса/кружка/текста) — НЕ врём про «не открылось», встреча
+# жива, просто просим повторить. Одна константа на все три входа (текст/голос/кружок).
+_TALK_FALLBACK = (
+    "Ой, меня на секунду тут заело — не с тобой, а с проводами. Скажи это ещё "
+    "разок, я уже здесь и слушаю.")
 
 # Волна 1:1 (совещание 03.07): маркеры намерения клиентки, НЕ зависят от мозга v2.
 # Границы слов — чтобы «отлично» не читалось как «лично».
@@ -224,6 +232,20 @@ def _request_from_cm(cm: dict | None) -> str | None:
     Пусто → None (уйдёт в мягкую ветку без цитаты). Чистая, тестируемая."""
     request = ((cm or {}).get("true_request_hypothesis") or "").strip()
     return request or None
+
+
+def _is_dead_session(idle_min: float | None, nudged: bool, turns: int,
+                     min_idle: int = 30, min_turns: int = 2) -> bool:
+    """Батч Б: чистый предикат «встреча умерла молчанием» — мягкий нудж УЖЕ слали,
+    диалог реально состоялся (turns ≥ min_turns) и клиент молчит ≥ min_idle минут.
+    Такую закрываем ВДОГОНКУ с оффером (иначе лид теряется навсегда). Крэш-сейф:
+    idle None / нечисло → False. Границы 30/2. Тестируется без БД."""
+    if not nudged or idle_min is None:
+        return False
+    try:
+        return float(idle_min) >= min_idle and int(turns) >= min_turns
+    except (TypeError, ValueError):
+        return False
 
 
 def _should_binary_close(otype: str | None, readiness: float | None) -> bool:
@@ -415,6 +437,17 @@ async def open_shadow_session(target: Message, user, code: str,
                     logger.warning("shadow-over-live kbd failed (plain)", exc_info=True)
                     await target.answer(f"«{q}»", parse_mode=None)
                 return True
+            # Батч Б (антиканнибализация): осиротевшую ЖИВУЮ встречу мы сейчас
+            # закроем ради новой Тень-сессии — но у неё мог быть вскрытый запрос и
+            # НЕ отправленный оффер. Чтобы лид не выпал из машины, ставим followup-
+            # серию ДО закрытия (followup_schedule сам идемпотентен — одна серия на
+            # человека, купившим/уже стоявшим не задваивается).
+            try:
+                if _request_from_cm(await get_client_model(user.id)):
+                    await _schedule_followups(user.id)
+            except Exception:
+                logger.warning("orphan followups schedule failed (continuing)",
+                               exc_info=True)
             try:
                 await ai_close_all_active(user.id)
                 await log_event(user.id, "session_reopen_stale", str(sess["id"]))
@@ -916,12 +949,20 @@ def _ensure_reply(reply: str) -> str:
 _IMPERATIVE_TAIL_RE = re.compile(
     r"(расскаж|скажи|назови|вспомни|посмотри|побудь|попробуй|ответь|напиши|"
     r"опиши|подел|представь|прислушайся|заметь|давай|шагн|тронь|жми|выбер|"
-    r"загляни|начни)", re.I)
+    r"загляни|начни|дыши|выдохн|вдохн|постой|подожди|останься|помолчи)", re.I)
 
 _PROMPT_CUES = (
     "Что из этого отзывается в тебе сильнее всего?",
     "Как это живёт у тебя — расскажи, как есть.",
     "Узнаёшь себя в этом?",
+)
+
+# На пике боли рефлексивный вопрос запрещён (PEAK-протокол) — страховка дошивает
+# микрошаг размером в одно слово, держащий контакт без провала в бездну.
+_PEAK_CUES = (
+    "Напиши мне одно слово — что сейчас в груди.",
+    "Просто поставь точку — и я пойму, что ты рядом.",
+    "Скажи одно слово: «я тут». Больше ничего не нужно.",
 )
 
 
@@ -938,11 +979,13 @@ def _needs_prompt(reply: str) -> bool:
     return not _IMPERATIVE_TAIL_RE.search(tail)
 
 
-def _ensure_prompt(reply: str, turns: int) -> str:
-    """Дошить побуждение к констатирующей реплике (ротация форм — не робот)."""
+def _ensure_prompt(reply: str, turns: int, peak: bool = False) -> str:
+    """Дошить побуждение к констатирующей реплике (ротация форм — не робот).
+    peak=True (диагноз выставил пик боли) → микрошаг-«одно слово», НЕ вопрос."""
     if not _needs_prompt(reply):
         return reply
-    return f"{reply.rstrip()} {_PROMPT_CUES[turns % len(_PROMPT_CUES)]}"
+    cues = _PEAK_CUES if peak else _PROMPT_CUES
+    return f"{reply.rstrip()} {cues[turns % len(cues)]}"
 
 
 def _last_question(text: str) -> str | None:
@@ -970,6 +1013,39 @@ def _last_question(text: str) -> str | None:
     if len(tail) > 200:
         tail = tail[-200:].lstrip()
     return tail or None
+
+
+def _question_echo_text(reply: str, turns: int) -> str:
+    """Чистый выбор текст-дублёра после УСПЕШНОГО голосового (батч Б: ОДИН код для
+    _talk и orphan-тика — раньше он жил только в _talk). Есть вопрос → его, рамкой-
+    ротацией; вопроса нет → ХВОСТ её слов (не шаблон); совсем пусто → живой cue,
+    чтобы после голосового не читалось как «бот замолчал». Тестируется без БД."""
+    q = _last_question(reply)
+    if q:
+        if q.rstrip().endswith("?"):
+            heads = ("Мой вопрос: «%s»", "«%s»", "Вопрос перед глазами: «%s»",
+                     "Оставлю здесь: «%s»")
+        else:
+            # Вопроса в реплике нет — дублируем ХВОСТ её слов (не шаблон),
+            # нейтральной рамкой (аудит воронки 06.07).
+            heads = ("Оставлю здесь: «%s»", "«%s»", "Побудь с этим: «%s»",
+                     "Перед глазами: «%s»")
+        return heads[turns % len(heads)] % q
+    # Совсем пустая реплика (край) — ротация форм, не робот (фидбек Кая 06.07).
+    cues = ("Я рядом — что из этого отзывается? 🎙",
+            "Что тут твоё? Скажи как есть — голосом или текстом 🎙",
+            "Побудь с этим. Твой ход 🎙")
+    return cues[turns % len(cues)]
+
+
+async def _send_question_echo(bot, chat_id: int, reply: str, turns: int):
+    """Отправить текст-дублёр вопроса/хвоста после успешного голосового (батч Б):
+    ОДНА точка правды для _talk и orphan-тика. Крэш-сейф: сбой не рвёт ход."""
+    try:
+        await bot.send_message(chat_id, _question_echo_text(reply, turns),
+                               parse_mode=None)
+    except Exception:
+        logger.warning("_send_question_echo failed (continuing)", exc_info=True)
 
 
 # ── «Живое присутствие»: индикатор печати + паузы + разбивка на реплики ───────
@@ -1064,10 +1140,7 @@ async def on_alena_talk(message: Message):
         # про «не удалось открыть» — встреча жива, просто просим повторить.
         logger.exception("on_alena_talk failed for %s", message.from_user.id)
         try:
-            await message.answer(
-                "Ой, меня на секунду тут заело — не с тобой, а с проводами. Скажи "
-                "это ещё разок, я уже здесь и слушаю.",
-                parse_mode=None)
+            await message.answer(_TALK_FALLBACK, parse_mode=None)
         except Exception:
             pass
 
@@ -1158,6 +1231,7 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
         brain_track = None
         brain_phase = None        # фаза метода из диагноза → триггер закрытия на native_offer
         brain_medium = None       # H1: "voice" на эмоц. пике/сдвиге → ответ голосовым
+        _peak_now = False         # пик боли из диагноза → дошив-микрошаг вместо вопроса
         try:
             if settings.brain_v2_enabled:
                 try:
@@ -1176,12 +1250,24 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
                     # реплике ломает живость (фидбек Кая 02.07).
                     spoken_name = user.first_name if re.search(
                         r"[а-яА-ЯёЁ]", user.first_name or "") else None
-                    reply, new_cm, brain_signals, brain_track = await brain_turn(
-                        history, spoken_name, archetype, cm, profile,
-                        fresh=(turns <= 1), force_voice=by_voice, tg_id=user.id)
+                    # Батч Б: на 9-10-м ходу подсказываем мозгу мягко сворачивать к
+                    # офферу, а не начинать новое копание (closing_hint — новый
+                    # опциональный параметр от батча А; TypeError = сигнатура ещё не
+                    # смерджена → фолбэк на старый вызов, ход не рвётся).
+                    _closing_hint = turns >= TURN_CAP - 1
+                    try:
+                        reply, new_cm, brain_signals, brain_track = await brain_turn(
+                            history, spoken_name, archetype, cm, profile,
+                            fresh=(turns <= 1), force_voice=by_voice, tg_id=user.id,
+                            closing_hint=_closing_hint)
+                    except TypeError:
+                        reply, new_cm, brain_signals, brain_track = await brain_turn(
+                            history, spoken_name, archetype, cm, profile,
+                            fresh=(turns <= 1), force_voice=by_voice, tg_id=user.id)
                     await save_client_model(user.id, json.dumps(new_cm, ensure_ascii=False))
                     brain_phase = (new_cm or {}).get("method_phase")
                     brain_medium = (new_cm or {}).get("medium")
+                    _peak_now = bool((new_cm or {}).get("peak"))
                 except Exception as e:
                     logger.warning("brain_v2 turn failed for %s → fallback v1: %s", user.id, e,
                                    exc_info=True)
@@ -1320,7 +1406,9 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
         # констатацией — дошиваем приглашение к её ходу (в голос И в текст).
         # Закрывающий ход не трогаем: он намеренно «завершает мягко» перед оффером.
         if not closed:
-            reply = _ensure_prompt(reply, turns)
+            # На пике боли (диагноз peak) дошив = микрошаг-«одно слово», не вопрос
+            # (PEAK-протокол запрещает рефлексивный вопрос-в-бездну на пике).
+            reply = _ensure_prompt(reply, turns, peak=_peak_now)
         await ai_add_message(sid, user.id, "model", reply)
 
         if closed:
@@ -1346,26 +1434,9 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
             if sent_voice:
                 await log_event(user.id, "voice_reply", brain_phase or "v1")
                 # Мандат Кая: «текст используем для описания вопросов» — вопрос из
-                # голосового дублируем коротким текстом перед глазами (ротация форм).
-                q = _last_question(reply)
-                if q:
-                    if q.rstrip().endswith("?"):
-                        heads = ("Мой вопрос: «%s»", "«%s»", "Вопрос перед глазами: «%s»",
-                                 "Оставлю здесь: «%s»")
-                    else:
-                        # Вопроса в реплике нет — дублируем ХВОСТ её слов (не шаблон),
-                        # нейтральной рамкой (аудит воронки 06.07: перед глазами — ЕЁ
-                        # реплика, а не «мой вопрос» о невопросе).
-                        heads = ("Оставлю здесь: «%s»", "«%s»", "Побудь с этим: «%s»",
-                                 "Перед глазами: «%s»")
-                    await message.answer(heads[turns % len(heads)] % q, parse_mode=None)
-                else:
-                    # Совсем пустая реплика (край) — ротация форм, чтобы после голосового
-                    # не выглядело как «бот замолчал» (фидбек Кая 06.07). Не робот.
-                    cues = ("Я рядом — что из этого отзывается? 🎙",
-                            "Что тут твоё? Скажи как есть — голосом или текстом 🎙",
-                            "Побудь с этим. Твой ход 🎙")
-                    await message.answer(cues[turns % len(cues)], parse_mode=None)
+                # голосового дублируем коротким текстом перед глазами (батч Б: единый
+                # _send_question_echo — тот же код, что теперь и в orphan-тике).
+                await _send_question_echo(message.bot, message.chat.id, reply, turns)
             else:
                 # Телеметрия отказа голоса: видно В ЧЁМ дело (длина/TTS), а не гадаем.
                 await log_event(user.id, "voice_fallback_text", f"len={len(reply)}")
@@ -1456,7 +1527,16 @@ async def on_alena_voice(message: Message):
         return
     # Показываем расшифровку — человек видит, что я расслышала его слова.
     await message.answer(f"🎙️ {text}", parse_mode=None)
-    await _talk(message, text, by_voice=True)
+    # Страховка Волны 0 (батч Б): сбой _talk внутри голосового входа не оставляет
+    # клиентку в тишине — тот же мягкий фолбэк, что и в on_alena_talk.
+    try:
+        await _talk(message, text, by_voice=True)
+    except Exception:
+        logger.exception("on_alena_voice _talk failed for %s", message.from_user.id)
+        try:
+            await message.answer(_TALK_FALLBACK, parse_mode=None)
+        except Exception:
+            pass
 
 
 # ── Кружок ОТ человека: распознаём видео-кружок как реплику (Кай 02.07) ────────
@@ -1527,7 +1607,17 @@ async def on_alena_video_note(message: Message):
     if nonverbal:
         await log_event(message.from_user.id, "video_nonverbal")
         text = f"{text}\n[видно в кадре: {nonverbal}]"
-    await _talk(message, text, by_voice=True)
+    # Страховка Волны 0 (батч Б): сбой _talk внутри кружок-входа не оставляет
+    # клиентку в тишине — тот же мягкий фолбэк, что и в on_alena_talk.
+    try:
+        await _talk(message, text, by_voice=True)
+    except Exception:
+        logger.exception("on_alena_video_note _talk failed for %s",
+                         message.from_user.id)
+        try:
+            await message.answer(_TALK_FALLBACK, parse_mode=None)
+        except Exception:
+            pass
 
 
 # ── После оффера: сомнения/возражения НЕ теряем — дожимаем (Кай 02.07) ─────────
@@ -1721,43 +1811,64 @@ async def run_club_ladder_tick(bot):
 
 
 async def run_orphan_turn_tick(bot):
-    rows = await ai_orphan_sessions(minutes=3)
+    # Батч Б: порог 3→2 мин — быстрее подхватываем ход, убитый редеплоем (после
+    # рестарта планировщика до 5 мин тишины было слишком долго).
+    rows = await ai_orphan_sessions(minutes=2)
     healed = 0
     for r in rows:
         sid, tg_id = r.get("session_id"), r.get("tg_id")
         if not sid or not tg_id:
             continue
         try:
-            history = await ai_get_messages(sid, HISTORY_LIMIT)
-            if not history or history[-1].get("role") != "user":
-                continue  # гонка: ответ уже пришёл — не дублируем
-            u = await get_user(tg_id)
-            shadow = (u or {}).get("shadow_dist")
-            archetype = None
-            profile = None
-            if shadow:
-                counts = decode_distribution(shadow)
-                if counts:
-                    archetype = ARCHETYPES[winner_from_counts(counts)]
-            # ЕДИНЫЙ чекпойнт памяти (_gate_dossier) — та же гарантия, что и в _talk.
-            gated_dossier = await _gate_dossier(tg_id, (u or {}).get("dossier"))
-            if gated_dossier:
-                profile = f"досье прошлых встреч: {gated_dossier[:600]}"
-            name = None  # имени из Message тут нет; мозг ведёт без обращения
-            reply, new_cm, signals, track = await brain_turn(
-                history, name, archetype, await get_client_model(tg_id),
-                profile, fresh=False, tg_id=tg_id)
-            await save_client_model(tg_id, json.dumps(new_cm, ensure_ascii=False))
-            reply = strip_dangling_markers(extract_phase(
-                extract_score(extract_dossier(extract_request(
-                    reply.replace(CLOSE_MARK, ""))[0])[0])[0])[0]).strip()
-            if not reply:
-                continue
-            await ai_add_message(sid, tg_id, "model", reply)
-            if not await send_voice_to(bot, tg_id, reply):
-                await bot.send_message(tg_id, reply, parse_mode=None)
-            await log_event(tg_id, "orphan_recovered")
-            healed += 1
+            # Батч Б (TOCTOU-фикс): держим _user_lock ЭТОГО юзера на всю обработку —
+            # пока идёт brain_turn (15-40с), параллельный _talk/on_alena_talk ждёт и
+            # не создаёт двойного ответа. Лок — только на одну сессию, не на весь цикл.
+            async with _user_lock(tg_id):
+                history = await ai_get_messages(sid, HISTORY_LIMIT)
+                if not history or history[-1].get("role") != "user":
+                    continue  # гонка: ответ уже пришёл — не дублируем
+                # turns для ротации дошива/эха — по числу реплик клиентки в истории.
+                turns = sum(1 for h in history if h.get("role") == "user")
+                u = await get_user(tg_id)
+                shadow = (u or {}).get("shadow_dist")
+                archetype = None
+                profile = None
+                if shadow:
+                    counts = decode_distribution(shadow)
+                    if counts:
+                        archetype = ARCHETYPES[winner_from_counts(counts)]
+                # ЕДИНЫЙ чекпойнт памяти (_gate_dossier) — та же гарантия, что и в _talk.
+                gated_dossier = await _gate_dossier(tg_id, (u or {}).get("dossier"))
+                if gated_dossier:
+                    profile = f"досье прошлых встреч: {gated_dossier[:600]}"
+                name = None  # имени из Message тут нет; мозг ведёт без обращения
+                reply, new_cm, signals, track = await brain_turn(
+                    history, name, archetype, await get_client_model(tg_id),
+                    profile, fresh=False, tg_id=tg_id)
+                await save_client_model(tg_id, json.dumps(new_cm, ensure_ascii=False))
+                reply = strip_dangling_markers(extract_phase(
+                    extract_score(extract_dossier(extract_request(
+                        reply.replace(CLOSE_MARK, ""))[0])[0])[0])[0]).strip()
+                if not reply:
+                    continue
+                # Батч Б: повторная проверка ПЕРЕД записью — за время brain_turn клиент
+                # мог написать сам (его _talk ждал на локе); тогда последнее сообщение
+                # уже не 'user' от нас, и наш ответ был бы устаревшим поверх свежего.
+                fresh = await ai_get_messages(sid, HISTORY_LIMIT)
+                if not fresh or fresh[-1].get("role") != "user" or len(fresh) != len(history):
+                    continue  # диалог сдвинулся — не дублируем/не перетираем
+                # Батч Б: тот же дошив приглашения, что в _talk (ход не кончается
+                # голой констатацией); на пике — микрошаг, не вопрос (PEAK-протокол).
+                reply = _ensure_prompt(reply, turns,
+                                       peak=bool((new_cm or {}).get("peak")))
+                await ai_add_message(sid, tg_id, "model", reply)
+                if not await send_voice_to(bot, tg_id, reply):
+                    await bot.send_message(tg_id, reply, parse_mode=None)
+                else:
+                    # Батч Б: текст-дубль вопроса после голосового — как в _talk.
+                    await _send_question_echo(bot, tg_id, reply, turns)
+                await log_event(tg_id, "orphan_recovered")
+                healed += 1
         except Exception:
             logger.warning("orphan recover failed for %s", tg_id, exc_info=True)
     if healed:
@@ -1773,13 +1884,27 @@ async def run_stale_session_tick(bot):
     """
     if not settings.stale_nudge_enabled:
         return 0
-    rows = await ai_stale_sessions(settings.stale_nudge_minutes)
+    # Батч Б: ловим кандидатов уже с ПИК-порога (7 мин) — но обычную встречу нудж
+    # ждёт полный stale_nudge_minutes. Пик (client_model.peak от батча А) шлём раньше:
+    # замолчала «на нерве» → успеть, пока горячо.
+    peak_min = min(settings.stale_nudge_peak_minutes, settings.stale_nudge_minutes)
+    rows = await ai_stale_sessions(peak_min)
     sent = 0
     for r in rows:
         sid = r.get("session_id")
         tg_id = r.get("tg_id")
         if not sid or not tg_id:
             continue
+        # Пик? Читаем модель клиентки крэш-сейф: нет поля/сбой → обычный порог.
+        is_peak = False
+        try:
+            is_peak = bool((await get_client_model(tg_id) or {}).get("peak"))
+        except Exception:
+            is_peak = False
+        if not is_peak:
+            idle = await ai_session_idle_minutes(sid)
+            if idle is None or idle < settings.stale_nudge_minutes:
+                continue  # обычная встреча ещё не дозрела до наджа (порог 20 мин)
         # Метим ДО отправки: сбой доставки (юзер закрыл личку) не должен крутить
         # нудж на следующем тике — задвоенный outreach хуже одного пропуска.
         await ai_mark_nudged(sid)
@@ -1790,13 +1915,67 @@ async def run_stale_session_tick(bot):
                                        _club_only_kbd()):
                 await bot.send_message(tg_id, _STALE_NUDGE_TEXT,
                                        reply_markup=_club_only_kbd(), parse_mode=None)
-            await log_event(tg_id, "stale_nudge")
+            # Батч Б: session_id в мету события — иначе аудит не сопоставляет надж↔сессию.
+            await log_event(tg_id, "stale_nudge", str(sid))
             sent += 1
         except Exception:
             logger.warning("stale nudge send failed for %s", tg_id, exc_info=True)
     if sent:
         logger.info("stale nudge: sent %s club offer(s) to quiet meetings", sent)
     return sent
+
+
+async def run_dead_session_tick(bot):
+    """Батч Б (аудит боем 06.07): встреча, «умершая молчанием клиента» — нудж УЖЕ
+    слали (nudged_at NOT NULL), turns ≥ 2, клиент молчит ≥ dead_session_minutes →
+    закрываем ВДОГОНКУ полным оффер-путём (ai_close_all_active + реконструкция
+    запроса + фон-оффер _after_close_bg + followup-серия). Без этого лид уходил
+    МИМО оффер-пути — ни оффера, ни дожима, потерян навсегда. Один проход на
+    встречу: ai_close_all_active переводит её в 'closed', и следующий тик её не
+    берёт (ai_dead_sessions фильтрует status='active'). Крэш-сейф, per-user лок."""
+    rows = await ai_dead_sessions(settings.dead_session_minutes)
+    closed = 0
+    for r in rows:
+        sid, tg_id = r.get("session_id"), r.get("tg_id")
+        turns = r.get("turns") or 0
+        if not sid or not tg_id:
+            continue
+        try:
+            # Лок юзера: параллельный _talk/orphan не перетрёт закрытие; повторная
+            # проверка под локом — клиент мог ответить (встреча ожила) или её уже
+            # закрыли (гард от даблов).
+            async with _user_lock(tg_id):
+                sess = await ai_active_session(tg_id)
+                if not sess or sess.get("id") != sid:
+                    continue  # встреча уже не активна / не та — не наш случай
+                idle = await ai_session_idle_minutes(sid)
+                if not _is_dead_session(idle, True, turns,
+                                        min_idle=settings.dead_session_minutes):
+                    continue  # клиент ответил за это время → встреча жива
+                # Реконструкция запроса ДО закрытия (тот же путь, что в _after_close).
+                request = _request_from_cm(await get_client_model(tg_id) or {})
+                # Полный путь закрытия: гасим все активные (гард даблов), сохраняем
+                # запрос, событие, оффер вдогонку в фоне (chat_id == tg_id в личке).
+                await ai_close_all_active(tg_id)
+                if request:
+                    await ai_set_last_request(tg_id, request)
+                await log_event(tg_id, "session_died_silent", str(sid))
+                await _after_close_bg(bot, tg_id, tg_id, request)
+                closed += 1
+                # Сирена админу (образец существующих алертов воронки).
+                try:
+                    if settings.tg_admin_id:
+                        await bot.send_message(
+                            settings.tg_admin_id,
+                            f"⚰️ Сессия умерла молчанием: клиент {tg_id}, "
+                            f"ходов {turns}, оффер отправлен вдогонку")
+                except Exception:
+                    pass
+        except Exception:
+            logger.warning("dead session close failed for %s", tg_id, exc_info=True)
+    if closed:
+        logger.info("dead session tick: закрыто с оффером — %s", closed)
+    return closed
 
 
 def _followup_delays() -> list[int]:
@@ -1944,14 +2123,14 @@ async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
         pass
 
 
-async def _nudge_channel(message: Message, user):
+async def _nudge_channel(message: Message, tg_id: int):
     """Мягкий нудж подписки на канал в КОНЦЕ встречи (пик доверия) — отдельным
     коротким сообщением ПОСЛЕ оффера, не в платной клавиатуре. Крэш-сейф.
     Уже подписанных не трогаем (бот админ @kydaidy → _is_subscribed надёжен;
     None/сбой → мягко покажем, cb_check_sub всё равно засчитает)."""
     try:
         from handlers import _is_subscribed, _subscribe_kbd
-        if await _is_subscribed(message.bot, user.id) is True:
+        if await _is_subscribed(message.bot, tg_id) is True:
             return
         await message.answer(
             "И ещё — что бы ты сейчас ни выбрала, я никуда не денусь: в канале "
@@ -1962,81 +2141,109 @@ async def _nudge_channel(message: Message, user):
         logger.warning("_nudge_channel failed (continuing)", exc_info=True)
 
 
-async def _after_close(message: Message, user, request: str | None = None):
+async def _ac_speak(bot, chat_id: int, message, text: str,
+                    kbd=None, protected: bool = False) -> bool:
+    """Батч Б: доставка реплики Алёны в оффер-пути — message-путь → send_voice_reply,
+    фон (message=None, мёртвая встреча) → send_voice_to. Одна точка ветвления канала."""
+    if message is not None:
+        return await send_voice_reply(message, text, kbd, protected=protected)
+    return await send_voice_to(bot, chat_id, text, kbd, protected=protected)
+
+
+async def _ac_say(bot, chat_id: int, message, text: str, kbd=None):
+    """Батч Б: текст-доставка — message.answer vs bot.send_message (фон)."""
+    if message is not None:
+        await message.answer(text, parse_mode=None, reply_markup=kbd)
+    else:
+        await bot.send_message(chat_id, text, reply_markup=kbd, parse_mode=None)
+
+
+async def _do_after_close(bot, chat_id: int, tg_id: int, first_name: str | None,
+                          request: str | None = None, message=None):
+    """Общее ядро оффер-пути после закрытия встречи (Волна 1 + батч Б).
+
+    message задан → живой ход (send_voice_reply / message.answer / канал-надж);
+    message=None → фон мёртвой встречи (send_voice_to / bot.send_message, без
+    канал-наджа — некому «печатать» вживую). Сегментация / реконструкция запроса /
+    followups — общие, чтобы message-путь и фон не расходились."""
     # Сегментация оффера — ТОЛЬКО по реальному членству в Клубе (фикс 02.07:
-    # whitelist-тестеры раньше улетали в VIP-ветку и не видели боевой путь —
-    # кружок-оффер/дожимы; теперь тестовый аккаунт проходит как обычная клиентка,
-    # безлимит встреч у него остаётся).
-    is_member = await _is_club_member(user.id)
+    # whitelist-тестеры раньше улетали в VIP-ветку и не видели боевой путь).
+    is_member = await _is_club_member(tg_id)
 
-    # Волна 1: закрытие могло прийти БЕЗ маркера [[ЗАПРОС]] (жёсткие доводки —
-    # TURN_CAP, «да» на мост) → request пуст, оффер-кружок раньше проваливался.
-    # Реконструируем запрос из модели клиентки (настоящий → фасад), чтобы
-    # кружок-оффер собрался всегда.
+    # Волна 1: закрытие могло прийти БЕЗ маркера [[ЗАПРОС]] → реконструируем запрос
+    # из модели клиентки (настоящий → фасад), чтобы кружок-оффер собрался всегда.
     if not request:
-        cm = await get_client_model(user.id) or {}
-        request = _request_from_cm(cm)
+        request = _request_from_cm(await get_client_model(tg_id) or {})
 
-    # Вскрылся (или реконструирован) настоящий запрос → ведём дальше. Волна 1:
-    # ВСЕ сегменты получают именной оффер-кружок. Схема одна: (а) тизер №1 голосом
-    # с прикреплённой клавиатурой сегмента → (б) фоновый рендер кружка сегментным
-    # скриптом → (в) карточка №3 с кнопками после кружка (надёжный путь, мандат Кая).
     if request:
         q = request.strip().rstrip(".")[:140]
-        _name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
+        _name = first_name if re.search(r"[а-яА-ЯёЁ]", first_name or "") else None
         if is_member:
             # Член Клуба → мост в 1:1 (текст №8в), без двери Клуба (он уже внутри).
-            await log_event(user.id, "offer_shown", "bridge_1on1")
+            await log_event(tg_id, "offer_shown", "bridge_1on1")
             script = _MEMBER_KRUZHOK_SCRIPT
             kbd = _member_offer_kbd()
             card = _MEMBER_OFFER_CARD
-            fallback = _MEMBER_KRUZHOK_SCRIPT  # сбой кружка → тот же мост в 1:1 текстом/голосом
+            fallback = _MEMBER_KRUZHOK_SCRIPT
         else:
-            # Адаптивный порядок (Кай 02.07): ГОРЯЧЕЙ (трек T4 / lead_hot_kw) — скрипт
-            # флагмана 1:1; сама тянулась глубже (depth_intent) — depth-скрипт; иначе
-            # дефолт (текст №2). Скрипты флагмана/depth = боевые формулировки без правок.
-            u_row = await get_user(user.id)
-            hot_kw = (await events_count_recent(user.id, "lead_hot_kw", 48)) > 0
+            # Адаптивный порядок (Кай 02.07): ГОРЯЧЕЙ (T4 / lead_hot_kw) — флагман 1:1;
+            # тянулась глубже (depth_intent) — depth-скрипт; иначе дефолт (текст №2).
+            u_row = await get_user(tg_id)
+            hot_kw = (await events_count_recent(tg_id, "lead_hot_kw", 48)) > 0
             if (u_row or {}).get("lead_track") == "T4" or hot_kw:
-                await log_event(user.id, "offer_shown",
+                await log_event(tg_id, "offer_shown",
                                 "flagship_1on1_kw" if hot_kw else "flagship_1on1_T4")
                 script = _flagship_kruzhok_script(q)
-            elif (await events_count_recent(user.id, "depth_intent", 48)) > 0:
-                await log_event(user.id, "offer_shown", "depth_1on1")
+            elif (await events_count_recent(tg_id, "depth_intent", 48)) > 0:
+                await log_event(tg_id, "offer_shown", "depth_1on1")
                 script = _depth_kruzhok_script(q)
             else:
-                await log_event(user.id, "offer_shown", "club_request")
+                await log_event(tg_id, "offer_shown", "club_request")
                 script = _default_kruzhok_script(_name, q)
             kbd = _offer_kbd()
             card = _OFFER_CARD
             fallback = _OFFER_FALLBACK_TEXT
         # (а) тизер №1 голосом + клавиатура сегмента (кнопка уже с тизером — мандат Кая).
-        if not await send_voice_reply(message, _OFFER_TEASER, kbd):
-            await message.answer(_OFFER_TEASER, parse_mode=None, reply_markup=kbd)
+        if not await _ac_speak(bot, chat_id, message, _OFFER_TEASER, kbd):
+            await _ac_say(bot, chat_id, message, _OFFER_TEASER, kbd)
         # (б) оффер-кружок сегментным скриптом → (в) карточка сегмента + kbd (внутри).
-        asyncio.create_task(_offer_kruzhok(
-            message.bot, message.chat.id, user.id, script, kbd, card, fallback))
-        # Нудж канала/дожим — как раньше, только не члену (он уже внутри Клуба).
+        asyncio.create_task(_offer_kruzhok(bot, chat_id, tg_id, script, kbd, card, fallback))
+        # Нудж канала/дожим — не члену (он уже внутри Клуба). Канал-надж — только
+        # в живом ходе (нужен Message); фон ставит followup-серию так же.
         if not is_member:
-            await _nudge_channel(message, user)
-            await _schedule_followups(user.id)
+            if message is not None:
+                await _nudge_channel(message, tg_id)
+            await _schedule_followups(tg_id)
         return
 
     # Запроса не вскрылось / ей хватило — честно, без втюхивания.
     if is_member:
-        await message.answer(
-            "На сегодня всё. Ещё разговор — просто /alena.", reply_markup=_menu_kbd())
+        await _ac_say(bot, chat_id, message,
+                      "На сегодня всё. Ещё разговор — просто /alena.", _menu_kbd())
         return
-    await log_event(user.id, "offer_shown", "club_soft")
+    await log_event(tg_id, "offer_shown", "club_soft")
     soft = ("Это была твоя бесплатная встреча — больше таких не будет. Захочешь "
             "продолжить — я рядом каждый день в Клубе «Манифест»: две наши встречи в месяц, утренние аудио, "
             "живые эфиры и закрытый чат. Он только открылся — заходишь в числе первых. "
             "990 в месяц, чтобы не разбираться со всем этим в одиночку. Остались "
             "вопросы — просто напиши, отвечу. Дверь — под этим сообщением.")
-    if await send_voice_reply(message, soft, _club_only_kbd()):
-        await log_event(user.id, "voice_reply", "offer_soft")
+    if await _ac_speak(bot, chat_id, message, soft, _club_only_kbd()):
+        await log_event(tg_id, "voice_reply", "offer_soft")
     else:
-        await message.answer(soft + "\n\n— Алёна",
-                             reply_markup=_club_only_kbd(), parse_mode=None)
-    await _nudge_channel(message, user)
-    await _schedule_followups(user.id)
+        await _ac_say(bot, chat_id, message, soft + "\n\n— Алёна", _club_only_kbd())
+    if message is not None:
+        await _nudge_channel(message, tg_id)
+    await _schedule_followups(tg_id)
+
+
+async def _after_close(message: Message, user, request: str | None = None):
+    """Живой ход: тонкая обёртка над _do_after_close (message-путь без регрессии)."""
+    await _do_after_close(message.bot, message.chat.id, user.id,
+                          user.first_name, request, message=message)
+
+
+async def _after_close_bg(bot, chat_id: int, tg_id: int, request: str | None = None):
+    """Батч Б: фоновая версия — оффер вдогонку мёртвой встрече (нет Message)."""
+    u = await get_user(tg_id)
+    await _do_after_close(bot, chat_id, tg_id, (u or {}).get("first_name"),
+                          request, message=None)

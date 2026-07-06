@@ -1203,6 +1203,29 @@ async def ai_orphan_sessions(minutes: int = 3, limit: int = 20):
         return []
 
 
+async def ai_dead_sessions(minutes: int = 30, limit: int = 50):
+    """Батч Б: встречи, «умершие молчанием» — активные, где мягкий нудж УЖЕ слали
+    (nudged_at IS NOT NULL), turns >= 2, последнее сообщение — от Алёны ('model'),
+    а человек молчит дольше `minutes`. Такие закрываем ВДОГОНКУ полным оффер-путём
+    (иначе лид уходит без оффера и без followup-серии — навсегда, аудит 06.07).
+    Крэш-сейф: сбой → [] (деградирует только эта фича, не планировщик)."""
+    try:
+        return await _exec(
+            "SELECT s.id AS session_id, s.tg_id AS tg_id, s.turns AS turns "
+            "FROM ai_sessions s "
+            "JOIN ai_messages m ON m.id = ("
+            "    SELECT id FROM ai_messages WHERE session_id = s.id "
+            "    ORDER BY id DESC LIMIT 1) "
+            "WHERE s.status = 'active' AND s.nudged_at IS NOT NULL AND s.turns >= 2 "
+            "AND m.role = 'model' "
+            f"AND datetime(m.created_at) < datetime('now', '-{int(minutes)} minutes') "
+            f"LIMIT {int(limit)}",
+            fetch="all") or []
+    except Exception:
+        logger.warning("ai_dead_sessions failed (degraded)", exc_info=True)
+        return []
+
+
 async def ai_mark_nudged(session_id: int):
     """Пометить, что на этой встрече уже слали мягкий оффер Клуба (один на встречу)."""
     await _exec(

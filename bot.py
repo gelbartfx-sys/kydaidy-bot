@@ -28,7 +28,8 @@ from database import init_db, reconcile_oneonone_due
 from handlers import router
 from manifest7_guide import guide_router
 from alena_chat import (alena_router, run_stale_session_tick,
-                        run_orphan_turn_tick, run_club_ladder_tick)
+                        run_orphan_turn_tick, run_club_ladder_tick,
+                        run_dead_session_tick)
 from heygen_credits import run_credit_check
 from booking import book_router
 from calendly import reconcile_tick as calendly_reconcile_tick
@@ -172,8 +173,14 @@ async def main():
         run_stale_session_tick, "interval",
         minutes=settings.stale_nudge_tick_min, args=[bot])
     # T-1 (03.07): само-восстановление хода, убитого редеплоем (реплика клиентки
-    # без ответа >3 мин) — доотвечаем сами, тишина себя чинит.
+    # без ответа >2 мин) — доотвечаем сами, тишина себя чинит.
     scheduler.add_job(run_orphan_turn_tick, "interval", minutes=2, args=[bot])
+    # Батч Б: мёртвая встреча (клиент замолк после наджа, turns≥2, молчит
+    # ≥dead_session_minutes) закрывается ВДОГОНКУ с оффером — иначе лид уходит мимо
+    # оффер-пути (ни оффера, ни followup-серии). No-op, если таких встреч нет.
+    scheduler.add_job(
+        run_dead_session_tick, "interval",
+        minutes=settings.dead_session_tick_min, args=[bot])
     # Спящая лестница 1:1 (совещание 03.07): члену Клуба ≥14 дней — разовое
     # приглашение на живой разбор. При 0 членов — no-op.
     scheduler.add_job(run_club_ladder_tick, "interval", hours=24, args=[bot])
@@ -196,6 +203,11 @@ async def main():
     scheduler.add_job(calendly_reconcile_tick, "interval",
                       minutes=settings.calendly_poll_min, args=[bot])
     scheduler.start()
+
+    # Батч Б: прогнать orphan-восстановление СРАЗУ на старте (не ждать первого
+    # интервального тика). Редеплой рвёт ход и рестартит планировщик — до 5 мин
+    # тишины; разовый create_task чинит подвисшие встречи мгновенно после подъёма.
+    asyncio.create_task(run_orphan_turn_tick(bot))
 
     # Webhook server (для Tally + Tribute)
     app = web.Application()

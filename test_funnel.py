@@ -21,6 +21,7 @@ from alena_chat import (
     _last_question, _ensure_reply, _EMPTY_REPLY_STUB,
     _should_binary_close, _offer_kbd, _member_offer_kbd, _request_from_cm,
     _offer_kbd_kind, CLUB_URL, ONE_ON_ONE_URL,
+    _is_dead_session, _question_echo_text,
 )
 from alena_voice import _paid_touch_allowed, PAID_TOUCH_CAP_PER_MEETING
 
@@ -323,6 +324,42 @@ if __name__ == "__main__":
           "_valid_reply + _last_question fallback + _ensure_reply + "
           "binary_close + offer_kbd/member_offer_kbd + request_from_cm + "
           "offer_kbd_kind (bridge|club) + wave2 down-sell/trust директивы")
+
+
+# ── Батч Б: предикат «мёртвой встречи» (границы 30/2) ─────────────────────────
+def test_is_dead_session_boundaries():
+    # Граница idle 30 и turns 2 — включительно.
+    assert _is_dead_session(30, True, 2) is True
+    assert _is_dead_session(100, True, 2) is True
+    # Молчал меньше порога → ещё не мёртвая.
+    assert _is_dead_session(29.9, True, 2) is False
+    # Диалог не состоялся (turns < 2) → не берём (нечего офферить).
+    assert _is_dead_session(60, True, 1) is False
+    # Нудж ещё не слали → это дело stale-тика, не наше.
+    assert _is_dead_session(60, False, 5) is False
+    # Крэш-сейф: idle None / нечисло → False (не роняем джоб).
+    assert _is_dead_session(None, True, 5) is False
+    assert _is_dead_session("мусор", True, 5) is False
+    assert _is_dead_session(60, True, None) is False
+    # Кастомные границы (порог из конфига).
+    assert _is_dead_session(15, True, 2, min_idle=15) is True
+    assert _is_dead_session(14, True, 2, min_idle=15) is False
+
+
+# ── Батч Б: выбор текст-дублёра после голосового (вопрос vs хвост vs пусто) ────
+def test_question_echo_text():
+    # Есть вопрос → он в «…», рамка про вопрос, ротация по turns.
+    q = _question_echo_text("Понимаю тебя. А что ты сейчас чувствуешь в теле?", 0)
+    assert "А что ты сейчас чувствуешь в теле?" in q
+    assert _question_echo_text("Что тут твоё?", 0) != \
+        _question_echo_text("Что тут твоё?", 1), "ротация форм по turns"
+    # Вопроса нет → дублируем ХВОСТ её слов (последнее предложение), не шаблон.
+    tail = _question_echo_text("Ты держишь всё сама. Это стало твоей бронёй.", 0)
+    assert "Это стало твоей бронёй." in tail
+    # Совсем пустая реплика → живой cue (не «бот замолчал»), всегда строка.
+    empty = _question_echo_text("", 0)
+    assert isinstance(empty, str) and empty and "🎙" in empty
+    assert isinstance(_question_echo_text(None, 2), str)
 
 
 # ── Мандат Кая 06.07: ни один ход не кончается голой констатацией ─────────────

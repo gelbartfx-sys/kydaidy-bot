@@ -31,7 +31,13 @@ import brain_cascade
 from alena_persona import (
     build_diagnose_prompt, build_response_prompt, parse_diagnose_json,
     static_safe_reply, METHOD_PHASES, method_phase_to_step, clamp_readiness,
+    PHASE_STREAK_BREAK, CLOSING_HINT_DIRECTIVE,
 )
+
+# Фазы, где залипание диагноста особенно опасно (бесконечное копание без сдвига):
+# на streak≥PHASE_STREAK_LIMIT директива принудительно ломает топтание (task 1).
+PHASE_STREAK_LIMIT = 2
+_STREAK_BREAK_PHASES = ("surface_facade", "catch_contradiction")
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,8 @@ _SAFE_DIRECTIVE = {
     "directive": "будь рядом, слушай, веди мягко",
     "medium": "text",
     "track": "T2",
+    "peak": False,     # пик боли (травма/ядро/молчание после острого) — бережный протокол
+    "moves": [],       # маркеры приёмов арсенала, применённых этим ходом (анти-дубль)
 }
 
 
@@ -102,6 +110,78 @@ def score_to_signals(score: dict | None) -> dict:
     return out
 
 
+def _build_diagnosis(data: dict) -> dict:
+    """Сырой JSON диагноза → нормализованная директива (недостающее → дефолт).
+
+    Чистая, тестируемая (без сети): peak/moves/фаза/скоринг/шаг разбираются здесь,
+    мусор и отсутствие полей падают в безопасные дефолты (_default_diagnosis)."""
+    out = _default_diagnosis()
+    if isinstance(data.get("client_model"), dict):
+        out["client_model"] = data["client_model"]
+    if isinstance(data.get("score"), dict):
+        out["score"] = data["score"]
+    if data.get("method_phase") in METHOD_PHASES:
+        out["method_phase"] = data["method_phase"]
+    if isinstance(data.get("directive"), str) and data["directive"].strip():
+        out["directive"] = data["directive"].strip()
+    if data.get("medium") in ("text", "voice"):
+        out["medium"] = data["medium"]
+    if isinstance(data.get("track"), str) and data["track"].strip():
+        out["track"] = data["track"].strip()
+    # Пик боли: принимаем ТОЛЬКО литеральный true (мусор/строка/отсутствие → False).
+    out["peak"] = data.get("peak") is True
+    # Приёмы этого хода: только непустые строки (анти-дубль между встречами).
+    mv = data.get("moves")
+    out["moves"] = ([str(m).strip().lower() for m in mv
+                     if isinstance(m, str) and str(m).strip()]
+                    if isinstance(mv, list) else [])
+    # Готовность к офферу (0..1): копится по ходу, кормит следующий диагноз
+    # (модель видит свою прошлую оценку — «не гадает заново»). Мусор → 0.0.
+    out["offer_readiness"] = clamp_readiness(data.get("offer_readiness"))
+    # Шаг воронки (1..12): берём валидный из модели, иначе выводим из фазы метода
+    # (единый источник — маппинг method_phase_to_step, чтобы шаг не расходился с фазой).
+    fs = data.get("funnel_step")
+    if isinstance(fs, bool):
+        fs = None
+    if isinstance(fs, (int, float)) and 1 <= int(fs) <= 12:
+        out["funnel_step"] = int(fs)
+    else:
+        out["funnel_step"] = method_phase_to_step(out["method_phase"])
+    return out
+
+
+def _bump_streak(cm: dict, new_phase: str | None) -> int:
+    """Счётчик залипания фазы: сколько ходов подряд диагноз держит ту же method_phase.
+
+    Читает ПРЕЖНЮЮ фазу (cm['method_phase']) и streak (cm['phase_streak']), обновляет
+    оба и возвращает новое значение. Та же фаза → +1; смена/пусто → сброс в 1. Вызывать
+    ДО перезаписи cm['method_phase'] новой фазой. Чистая функция (тест)."""
+    prev_phase = cm.get("method_phase")
+    prev = cm.get("phase_streak")
+    prev = prev if isinstance(prev, int) and not isinstance(prev, bool) else 0
+    streak = prev + 1 if (new_phase and new_phase == prev_phase) else 1
+    cm["phase_streak"] = streak
+    return streak
+
+
+def _merge_moves(cm: dict, new_moves) -> list:
+    """Копит маркеры сыгранных приёмов в cm['used_moves'] (анти-дубль между встречами).
+
+    Дедуп с сохранением порядка, хвост ограничен (память не пухнет). Чистая функция."""
+    existing = cm.get("used_moves")
+    out = [str(m).strip().lower() for m in existing
+           if isinstance(m, str) and str(m).strip()] if isinstance(existing, list) else []
+    if isinstance(new_moves, (list, tuple)):
+        for m in new_moves:
+            if isinstance(m, str) and m.strip():
+                mm = m.strip().lower()
+                if mm not in out:
+                    out.append(mm)
+    out = out[-24:]
+    cm["used_moves"] = out
+    return out
+
+
 async def diagnose(history: list[dict], name, archetype,
                    client_model: dict | None, profile: str | None = None,
                    fresh: bool = False, tg_id: int | None = None) -> dict:
@@ -130,37 +210,13 @@ async def diagnose(history: list[dict], name, archetype,
     if not isinstance(data, dict):
         return _default_diagnosis()
     # Достраиваем недостающие ключи безопасными дефолтами (модель могла их опустить).
-    out = _default_diagnosis()
-    if isinstance(data.get("client_model"), dict):
-        out["client_model"] = data["client_model"]
-    if isinstance(data.get("score"), dict):
-        out["score"] = data["score"]
-    if data.get("method_phase") in METHOD_PHASES:
-        out["method_phase"] = data["method_phase"]
-    if isinstance(data.get("directive"), str) and data["directive"].strip():
-        out["directive"] = data["directive"].strip()
-    if data.get("medium") in ("text", "voice"):
-        out["medium"] = data["medium"]
-    if isinstance(data.get("track"), str) and data["track"].strip():
-        out["track"] = data["track"].strip()
-    # Готовность к офферу (0..1): копится по ходу, кормит следующий диагноз
-    # (модель видит свою прошлую оценку — «не гадает заново»). Мусор → 0.0.
-    out["offer_readiness"] = clamp_readiness(data.get("offer_readiness"))
-    # Шаг воронки (1..12): берём валидный из модели, иначе выводим из фазы метода
-    # (единый источник — маппинг method_phase_to_step, чтобы шаг не расходился с фазой).
-    fs = data.get("funnel_step")
-    if isinstance(fs, bool):
-        fs = None
-    if isinstance(fs, (int, float)) and 1 <= int(fs) <= 12:
-        out["funnel_step"] = int(fs)
-    else:
-        out["funnel_step"] = method_phase_to_step(out["method_phase"])
-    return out
+    return _build_diagnosis(data)
 
 
 async def respond(directive: str, method_phase: str, name, archetype,
                   history: list[dict], voice_mode: bool = False,
-                  profile: str | None = None, tg_id: int | None = None) -> str:
+                  profile: str | None = None, tg_id: int | None = None,
+                  peak: bool = False, used_moves=None) -> str:
     """ПРОХОД 2 — ответ голосом Алёны, исполняет директиву.
 
     voice_mode=True → ответ будет озвучен: промпт требует устную речь (коротко,
@@ -171,7 +227,8 @@ async def respond(directive: str, method_phase: str, name, archetype,
     безопасный ход по фазе метода (alena_persona.static_safe_reply)."""
     try:
         system = build_response_prompt(name, archetype, directive, method_phase,
-                                       voice_mode, profile)
+                                       voice_mode, profile, peak=peak,
+                                       used_moves=used_moves)
     except Exception:
         logger.warning("build_response_prompt failed (static safe reply)", exc_info=True)
         return static_safe_reply(method_phase)
@@ -199,7 +256,8 @@ async def brain_turn(history: list[dict], name, archetype,
                      profile: str | None = None,
                      fresh: bool = False,
                      force_voice: bool = False,
-                     tg_id: int | None = None) -> tuple[str, dict, dict, str | None]:
+                     tg_id: int | None = None,
+                     closing_hint: bool = False) -> tuple[str, dict, dict, str | None]:
     """Полный ход мозга v2: диагноз → ответ.
 
     → (reply Алёны, обновлённая модель клиентки, сигналы лида {heat,open,resist,value},
@@ -208,7 +266,10 @@ async def brain_turn(history: list[dict], name, archetype,
     записал lead-сигналы и трек (без этого закрытие на Клуб шло без топлива, а /sources
     был слеп к 🔥). diagnose() и respond() крэш-сейф внутри (провайдер-агностичный
     каскад, см. brain_cascade.py) — brain_turn() НИКОГДА не бросает исключение.
-    tg_id — телеметрия каскада (brain_layer/brain_failover в funnel_events)."""
+    tg_id — телеметрия каскада (brain_layer/brain_failover в funnel_events).
+    closing_hint=True — call-site знает, что ход последний/предпоследний в бесплатной
+    встрече (TURN_CAP): директиве добавляется мягкое свёртывание, чтобы ход не
+    оборвался зондирующим вопросом посреди боли перед механическим закрытием."""
     dx = await diagnose(history, name, archetype, client_model, profile, fresh, tg_id=tg_id)
     # Канал хода решается ЗДЕСЬ (единая точка): голос — если диагноз попросил ИЛИ
     # фаза = истинный запрос/сдвиг (эмоц. пик по определению). Ответ тогда пишется
@@ -218,17 +279,39 @@ async def brain_turn(history: list[dict], name, archetype,
     # речь и уходит голосовым; текст — только фолбэк при сбое TTS (в _talk).
     voice_out = True
     _ = force_voice  # сохранён в сигнатуре: зеркало канала теперь покрыто дефолтом
-    reply = await respond(dx.get("directive"), dx.get("method_phase"),
-                          name, archetype, history, voice_mode=voice_out,
-                          profile=profile, tg_id=tg_id)
 
-    # Собираем модель клиентки для сохранения: обновление от диагноза + служебка.
+    # Модель клиентки собираем ДО respond: нужно посчитать залипание фазы (анти-
+    # залипание, task 1) и достать приёмы прошлых встреч (анти-дубль, task 4).
     cm = dict(client_model) if isinstance(client_model, dict) else {}
+    new_phase = dx.get("method_phase")
+    # Счётчик залипания: по ПРЕЖНЕЙ сохранённой фазе (до перезаписи новой ниже).
+    streak = _bump_streak(cm, new_phase)
+    # Приёмы прошлых встреч (до слияния текущего хода) — голос их не повторяет.
+    past_moves = list(cm["used_moves"]) if isinstance(cm.get("used_moves"), list) else None
+
+    # Директива хода: базовая от диагноза + принудительные наслоения (ломают
+    # топтание на фазе и оборванное закрытие на TURN_CAP).
+    directive = dx.get("directive")
+    if streak >= PHASE_STREAK_LIMIT and new_phase in _STREAK_BREAK_PHASES:
+        directive = f"{directive} {PHASE_STREAK_BREAK}".strip()
+    if closing_hint:
+        directive = f"{directive} {CLOSING_HINT_DIRECTIVE}".strip()
+
+    reply = await respond(directive, new_phase,
+                          name, archetype, history, voice_mode=voice_out,
+                          profile=profile, tg_id=tg_id,
+                          peak=bool(dx.get("peak")), used_moves=past_moves)
+
+    # Дособираем модель клиентки для сохранения: обновление от диагноза + служебка.
     new_cm = dx.get("client_model")
     if isinstance(new_cm, dict):
         cm.update(new_cm)
-    cm["method_phase"] = dx.get("method_phase")
+    cm["method_phase"] = new_phase
+    cm["phase_streak"] = streak     # переустановка (на случай если update затёр)
     cm["track"] = dx.get("track")
+    # Пик боли — В МОДЕЛЬ (аудит финал-батча): его читают страховка дошива в _talk/
+    # orphan (микрошаг вместо вопроса-в-бездну) и ускоренный 7-мин надж stale-тика.
+    cm["peak"] = bool(dx.get("peak"))
     # Явный шаг воронки (1..12) и готовность к офферу (0..1) — часть структурного
     # диагноза: хранятся в состоянии (client_model), кормят следующий ход диагноза
     # (континуитет «не гадаем заново») и доступны /sources как топливо конверсии.
@@ -237,6 +320,8 @@ async def brain_turn(history: list[dict], name, archetype,
     # Директива канала ответа (H1): "voice" → _talk шлёт голосовым Алёны.
     # Едет внутри cm, чтобы не менять сигнатуру brain_turn.
     cm["medium"] = "voice" if voice_out else "text"
+    # Копим маркеры сыгранных приёмов (анти-дубль между встречами, task 4).
+    _merge_moves(cm, dx.get("moves"))
 
     signals = score_to_signals(dx.get("score"))
     track = dx.get("track") if isinstance(dx.get("track"), str) and dx.get("track") else None

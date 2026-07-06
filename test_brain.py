@@ -12,8 +12,14 @@ import os
 os.environ.setdefault("TG_BOT_TOKEN", "test:token")
 os.environ.setdefault("TG_ADMIN_ID", "0")
 
-from alena_persona import parse_diagnose_json, METHOD_PHASES, static_safe_reply
-from alena_brain import _default_diagnosis, score_to_signals
+from alena_persona import (
+    parse_diagnose_json, METHOD_PHASES, static_safe_reply,
+    build_response_prompt, PHASE_STREAK_BREAK, CLOSING_HINT_DIRECTIVE,
+)
+from alena_brain import (
+    _default_diagnosis, score_to_signals, _build_diagnosis,
+    _bump_streak, _merge_moves, PHASE_STREAK_LIMIT, _STREAK_BREAK_PHASES,
+)
 from lead_policy import classify
 import brain_cascade
 import growth_agent
@@ -226,6 +232,109 @@ def test_growth_make_draft_gates_dossier_by_real_purchase_status():
     asyncio.run(_run())
 
 
+# ── Батч А (мозг Алёны: фазы/пик/дубли) — аудит воронки 06.07 ────────────────
+def test_diagnosis_peak_moves_parse():
+    """_build_diagnosis разбирает peak/moves: валид/мусор/отсутствие → дефолты."""
+    # валид: peak true + список приёмов (нормализуется к lower)
+    d = _build_diagnosis({"method_phase": "catch_contradiction", "peak": True,
+                          "moves": ["Побудь-с-этим", "океан-за-словами"]})
+    assert d["peak"] is True
+    assert d["moves"] == ["побудь-с-этим", "океан-за-словами"], d["moves"]
+    # отсутствие полей → дефолты (peak False, moves [])
+    d2 = _build_diagnosis({"method_phase": "contact"})
+    assert d2["peak"] is False and d2["moves"] == []
+    # мусор: peak строкой/числом = НЕ пик (только литеральный true), moves не список
+    assert _build_diagnosis({"peak": "true", "moves": {"x": 1}})["peak"] is False
+    assert _build_diagnosis({"peak": "true"})["moves"] == []
+    d4 = _build_diagnosis({"peak": 1, "moves": ["дар-видеть", 5, "", "  "]})
+    assert d4["peak"] is False, "только literal true = пик"
+    assert d4["moves"] == ["дар-видеть"], d4["moves"]
+    # дефолт диагноза несёт peak/moves
+    base = _default_diagnosis()
+    assert base["peak"] is False and base["moves"] == []
+
+
+def test_bump_streak_increment_and_reset():
+    """phase_streak: та же фаза → +1, смена/пусто/мусор → сброс в 1 (чистая функция)."""
+    # первая фаза при пустой модели → 1 (прежней фазы нет)
+    cm = {}
+    assert _bump_streak(cm, "surface_facade") == 1 and cm["phase_streak"] == 1
+    # та же фаза подряд — инкремент
+    assert _bump_streak({"method_phase": "surface_facade", "phase_streak": 1},
+                        "surface_facade") == 2
+    assert _bump_streak({"method_phase": "surface_facade", "phase_streak": 2},
+                        "surface_facade") == 3
+    # смена фазы — сброс
+    assert _bump_streak({"method_phase": "surface_facade", "phase_streak": 3},
+                        "catch_contradiction") == 1
+    # мусорный прежний streak трактуется как 0 → 1
+    assert _bump_streak({"method_phase": "contact", "phase_streak": "oops"},
+                        "contact") == 1
+    # пустая новая фаза → сброс
+    assert _bump_streak({"method_phase": "contact", "phase_streak": 5}, None) == 1
+
+
+def test_streak_break_directive_carries_shift():
+    """На залипании (streak≥2, копающая фаза) директива несёт «сдвиг» и попадает
+    в промпт голоса; ниже лимита / на некопающей фазе — брейк НЕ клеится (task 1)."""
+    assert "сдвиг" in PHASE_STREAK_BREAK.lower()
+    phase = "catch_contradiction"
+    directive = "поймай противоречие"
+    # ровно логика brain_turn
+    if 2 >= PHASE_STREAK_LIMIT and phase in _STREAK_BREAK_PHASES:
+        directive = f"{directive} {PHASE_STREAK_BREAK}".strip()
+    assert "сдвиг" in directive.lower()
+    prompt = build_response_prompt("Аня", None, directive, phase)
+    assert "сдвиг" in prompt.lower() and "СТОП-ЗАЛИПАНИЕ" in prompt
+    # ниже лимита — не клеим
+    d2 = "веди мягко"
+    if 1 >= PHASE_STREAK_LIMIT and phase in _STREAK_BREAK_PHASES:
+        d2 = f"{d2} {PHASE_STREAK_BREAK}"
+    assert "СТОП-ЗАЛИПАНИЕ" not in d2
+
+
+def test_build_response_prompt_peak_injects_protocol():
+    """peak=True инъектирует протокол пика с запретом копающего вопроса-в-бездну."""
+    plain = build_response_prompt("Аня", None, "веди", "catch_contradiction", peak=False)
+    assert "ПИК БОЛИ" not in plain
+    peaked = build_response_prompt("Аня", None, "веди", "catch_contradiction", peak=True)
+    assert "ПИК БОЛИ" in peaked
+    assert "в каком именно моменте" in peaked, "запрет копающего вопроса на пике"
+
+
+def test_build_response_prompt_used_moves_antidubl():
+    """Прошлые приёмы → правило анти-дубля в промпте; без них — лимит «побудь с этим»."""
+    with_moves = build_response_prompt("Аня", None, "веди", "contact",
+                                       used_moves=["счёт-слов", "океан-за-словами"])
+    assert "АНТИ-ДУБЛЬ" in with_moves
+    assert "счёт-слов" in with_moves and "океан-за-словами" in with_moves
+    none_moves = build_response_prompt("Аня", None, "веди", "contact")
+    assert "не чаще ОДНОГО раза" in none_moves
+
+
+def test_merge_moves_accumulate_dedup():
+    """used_moves копится между ходами: дедуп с порядком, мусор/None отсеиваются."""
+    cm = {}
+    _merge_moves(cm, ["Счёт-слов"])
+    assert cm["used_moves"] == ["счёт-слов"]
+    _merge_moves(cm, ["счёт-слов", "дар-видеть", 5, ""])
+    assert cm["used_moves"] == ["счёт-слов", "дар-видеть"], cm["used_moves"]
+    _merge_moves(cm, None)
+    assert cm["used_moves"] == ["счёт-слов", "дар-видеть"]
+    cm2 = {"used_moves": ["A", 3, "B"]}
+    _merge_moves(cm2, ["c"])
+    assert cm2["used_moves"] == ["a", "b", "c"]
+
+
+def test_closing_hint_directive_folds_meeting():
+    """closing_hint → директива свёртывания (task 7): «свёртывание»/«последний» в промпте."""
+    low = CLOSING_HINT_DIRECTIVE.lower()
+    assert "свёртывание" in low and "последний" in low
+    directive = f"собери узел {CLOSING_HINT_DIRECTIVE}".strip()
+    prompt = build_response_prompt("Аня", None, directive, "name_true_request").lower()
+    assert "свёртывание" in prompt or "последний" in prompt
+
+
 if __name__ == "__main__":
     test_valid()
     test_wrapped()
@@ -239,6 +348,41 @@ if __name__ == "__main__":
     test_cascade_all_network_layers_disabled_falls_to_static()
     test_growth_context_dossier_requires_memory()
     test_growth_make_draft_gates_dossier_by_real_purchase_status()
+    test_diagnosis_peak_moves_parse()
+    test_bump_streak_increment_and_reset()
+    test_streak_break_directive_carries_shift()
+    test_build_response_prompt_peak_injects_protocol()
+    test_build_response_prompt_used_moves_antidubl()
+    test_merge_moves_accumulate_dedup()
+    test_closing_hint_directive_folds_meeting()
     print("OK: parse_diagnose_json + safe default + score_to_signals→lead track wire + "
          "brain_cascade (retry/failover/static/BRAIN_DISABLE) + "
-         "growth_agent dossier memory gate")
+         "growth_agent dossier memory gate + "
+         "batch-A brain (peak/moves parse, phase_streak, streak-break shift, "
+         "peak protocol, used_moves anti-dubl, merge_moves, closing_hint)")
+
+
+def test_brain_peak_persisted_to_client_model():
+    """Аудит финал-батча: peak обязан доехать до client_model — его читают
+    страховка дошива (_talk/orphan) и ускоренный 7-мин надж stale-тика."""
+    import asyncio
+    import alena_brain as ab
+
+    async def fake_diagnose(*a, **k):
+        d = ab._default_diagnosis()
+        d["peak"] = True
+        d["method_phase"] = "catch_contradiction"
+        return d
+
+    async def fake_respond(*a, **k):
+        return "Я рядом. Напиши мне одно слово — что сейчас в груди."
+
+    orig_d, orig_r = ab.diagnose, ab.respond
+    ab.diagnose, ab.respond = fake_diagnose, fake_respond
+    try:
+        reply, cm, signals, track = asyncio.run(
+            ab.brain_turn([{"role": "user", "content": "он уйдёт"}],
+                          None, None, {}, None))
+        assert cm.get("peak") is True, "peak потерян по пути в client_model"
+    finally:
+        ab.diagnose, ab.respond = orig_d, orig_r
