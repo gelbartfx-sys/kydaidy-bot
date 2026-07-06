@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 from config import settings
 from database import (upsert_user, add_purchase, add_subscription, get_user,
-                      set_oneonone, get_oneonone, deactivate_subscription)
+                      set_oneonone, get_oneonone, deactivate_subscription, log_event)
 from handlers import _send_povorot_result
 
 logger = logging.getLogger(__name__)
@@ -361,6 +361,13 @@ async def _grant_access(bot: Bot, tg_id: int, product_code: str):
     и сроком 7 дней через Bot API createChatInviteLink.
     """
     text = _BASE_TEXTS.get(product_code, "✅ Оплата получена. Спасибо.")
+
+    # Аналитика воронки: ОПЛАТА — терминальный шаг (без него PostHog слеп на деньгах).
+    # Крэш-сейф: телеметрия не должна мешать выдаче доступа.
+    try:
+        await log_event(tg_id, "payment", product_code)
+    except Exception:
+        logger.warning("log_event payment failed (continuing)", exc_info=True)
 
     channel_attr = _CHANNEL_BY_PRODUCT.get(product_code)
     if channel_attr:

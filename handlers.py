@@ -170,6 +170,10 @@ async def _is_subscribed(bot, tg_id: int) -> bool | None:
 async def cb_check_sub(cb: CallbackQuery):
     sub = await _is_subscribed(cb.bot, cb.from_user.id)
     if sub is not False:  # True (подписан) ИЛИ None (не смогли проверить) → засчитываем
+        try:
+            await log_event(cb.from_user.id, "subscribe_confirmed")
+        except Exception:
+            logger.debug("log_event subscribe_confirmed failed", exc_info=True)
         await cb.answer("Готово 🤍")
         await cb.message.answer(
             "🤍 Вижу тебя в канале — спасибо, что рядом.\n\n"
@@ -572,6 +576,12 @@ async def cmd_start(message: Message):
     user = message.from_user
     await upsert_user(user.id, user.username, user.first_name)
 
+    # Аналитика: вход в бот (шаг 1 воронки). Крэш-сейф — не мешаем /start.
+    try:
+        await log_event(user.id, "bot_start")
+    except Exception:
+        logger.debug("log_event bot_start failed", exc_info=True)
+
     # I10: /start = выход из активной AI-встречи. Закрываем сессию, иначе
     # состояние рассинхронится (человек «вышел» в меню, а система думает, что
     # разговор идёт, и следующий текст уходит в мозг). Крэш-сейф.
@@ -692,6 +702,12 @@ async def show_one_product(callback: CallbackQuery):
     user_id = callback.from_user.id
     bot = callback.bot
 
+    # Аналитика: клик «купить» (шаг 11 воронки — намерение оплаты). Крэш-сейф.
+    try:
+        await log_event(user_id, "buy_click", code)
+    except Exception:
+        logger.debug("log_event buy_click failed", exc_info=True)
+
     # Try DB first, then hardcoded defaults (Render free wipes SQLite on deploy)
     post = await get_tribute_post(code)
     src_chat = src_msg = None
@@ -796,11 +812,15 @@ async def capture_callback(callback: CallbackQuery):
 @router.message(Command("quiz"))
 async def show_quiz(event):
     target = event.message if isinstance(event, CallbackQuery) else event
+    try:
+        await log_event(event.from_user.id, "quiz_open")
+    except Exception:
+        logger.debug("log_event quiz_open failed", exc_info=True)
     await target.answer(
         "«Какая Тень в тебе активна» — тест из 10 тёмных женских архетипов. "
         "10 вопросов, 5 минут.\n\n"
         "Пройди здесь: https://kydaidy.com/shadow\n\n"
-        "В конце пришли мне сюда своё фото — соберу твой архетипический профиль. Бесплатно.",
+        "В конце пришли мне сюда своё фото — соберу твой архетипический профиль.",
         reply_markup=_menu_only_kbd(),
     )
     if isinstance(event, CallbackQuery):
