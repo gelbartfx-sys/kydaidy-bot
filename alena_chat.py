@@ -287,7 +287,26 @@ async def open_shadow_session(target: Message, user, code: str,
         # осиротевшую — закрываем и открываем путь заново.
         idle = await ai_session_idle_minutes(sess["id"])
         if idle is not None and idle < 15:
-            await target.answer("Мы уже во встрече — просто продолжай, я здесь.")
+            # Мандат Кая 06.07 (вскрыто тестом боем): Тень пришла ПОВЕРХ живой
+            # встречи — кружок задал СВОЙ вопрос, а тот не попадал ни в историю,
+            # ни текстом (голое «мы уже во встрече») → мозг вёл по старой ветке,
+            # клиентка теряла нить. Алёна ВЕДЁТ, а не отдаёт инициативу: вопрос
+            # Тени — в историю сессии + перед глазами + подсказки первого шага.
+            q = _SHADOW_HOOK_Q.get(code, "Что у тебя сейчас болит на самом деле?")
+            try:
+                await ai_add_message(sess["id"], user.id, "model", f"«{q}»")
+            except Exception:
+                logger.warning("seed shadow q to live session failed", exc_info=True)
+            try:
+                await target.answer(
+                    f"Мы уже во встрече — и твоя Тень как раз к месту. Теперь мой "
+                    f"вопрос такой:\n\n«{q}»\n\n"
+                    "Твой ход 🎙 — или коснись подсказки ниже:",
+                    parse_mode=None, reply_markup=_first_step_kbd(code))
+                await log_event(user.id, "first_step_kbd")
+            except Exception:
+                logger.warning("shadow-over-live kbd failed (plain)", exc_info=True)
+                await target.answer(f"«{q}»", parse_mode=None)
             return True
         try:
             await ai_close_all_active(user.id)
