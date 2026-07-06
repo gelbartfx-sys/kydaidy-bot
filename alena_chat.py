@@ -35,7 +35,7 @@ from database import (
     ai_close_session, ai_close_all_active, ai_session_idle_minutes,
     ai_set_last_request, save_dossier,
     ai_stale_sessions, ai_orphan_sessions, ai_mark_nudged, save_lead_signals, set_lead_track,
-    get_client_model, save_client_model,
+    get_client_model, save_client_model, get_meta,
     log_event, followup_schedule, get_lead_signals, add_circle_credits,
     ai_last_session, events_count_recent, club_ladder_candidates,
     memory_allowed as _db_memory_allowed,
@@ -236,17 +236,54 @@ def _should_binary_close(otype: str | None, readiness: float | None) -> bool:
     return otype == "think" and r >= 0.6
 
 
-async def _after_offer_kbd(user_id: int, u_row: dict | None) -> InlineKeyboardMarkup:
-    """Сегментная клавиатура отработки/дожима: горячим/глубоким — обе двери,
-    иначе один Клуб-CTA (совещание 04.07). Крэш-сейф → Клуб."""
+def _offer_kbd_kind(track: str | None, hot: bool, depth: bool,
+                    msg_text: str | None = None, obj_count: int = 0) -> str:
+    """Чистый селектор клавиатуры отработки/дожима → 'bridge'|'club'. ОДНА точка правды.
+    'bridge' (обе двери, 1:1 первым) когда: горячий/глубокий сегмент (события/трек);
+    ИЛИ в САМОМ возражении СВЕЖО звучат depth/hot-слова (кросс-селл вверх, Волна 2);
+    ИЛИ это последняя отработка перед потолком (obj_count ≥ OBJECTION_CAP-1) — тогда
+    альтернатива 1:1 вместо той же двери Клуба. Иначе 'club'. Тестируется без БД."""
+    if track == "T4" or hot or depth:
+        return "bridge"
+    if msg_text and (_HOT_RE.search(msg_text) or _DEPTH_RE.search(msg_text)):
+        return "bridge"
+    if obj_count >= OBJECTION_CAP - 1:
+        return "bridge"
+    return "club"
+
+
+async def _after_offer_kbd(user_id: int, u_row: dict | None,
+                           msg_text: str | None = None,
+                           obj_count: int = 0) -> InlineKeyboardMarkup:
+    """Сегментная клавиатура отработки/дожима: горячим/глубоким (события/трек),
+    свежему depth/hot прямо в возражении (кросс-селл, Волна 2) и на последней
+    отработке перед потолком — обе двери; иначе один Клуб-CTA (совещание 04.07).
+    Крэш-сейф → Клуб. Выбор — в чистом _offer_kbd_kind (тестируется без БД)."""
+    hot = depth = False
     try:
-        if ((u_row or {}).get("lead_track") == "T4"
-                or await events_count_recent(user_id, "lead_hot_kw", 48) > 0
-                or await events_count_recent(user_id, "depth_intent", 48) > 0):
-            return _bridge_kbd()
+        hot = await events_count_recent(user_id, "lead_hot_kw", 48) > 0
+        depth = await events_count_recent(user_id, "depth_intent", 48) > 0
     except Exception:
         pass
-    return _club_only_kbd()
+    kind = _offer_kbd_kind((u_row or {}).get("lead_track"), hot, depth,
+                           msg_text, obj_count)
+    return _bridge_kbd() if kind == "bridge" else _club_only_kbd()
+
+
+async def send_soc_proof_video(bot, chat_id: int) -> bool:
+    """Волна 2, Шаг 9: соц-пруф «Смотрим с Алёной» — видео живого разбора на
+    возражении доверия. file_id берём из bot_meta (ключ socproof_video_file_id):
+    ЛОКАЛЬНОГО файла на Render НЕТ, продюсер сеет file_id отдельно. Пусто/сбой
+    отправки → False (вызывающий фолбэчит на обычную trust-отработку). Крэш-сейф."""
+    try:
+        file_id = (await get_meta("socproof_video_file_id") or "").strip()
+        if not file_id:
+            return False
+        await bot.send_video(chat_id, video=file_id)
+        return True
+    except Exception:
+        logger.warning("soc-proof video send failed (fallback to text)", exc_info=True)
+        return False
 
 
 _EXHAUSTED_TEXT = (
@@ -1493,6 +1530,37 @@ async def on_after_offer(message: Message):
         obj_count = 1
     u = await get_user(user.id)
     request = (u or {}).get("last_ai_request") or ""
+    # Волна 2, Шаг 9: соц-пруф «Смотрим с Алёной» на возражении ДОВЕРИЯ. Показываем
+    # ОДИН раз (флаг-событие soc_proof_shown): подводка №6 голосом → видео (file_id
+    # из bot_meta) → послесловие №6 + двери. Это И ЕСТЬ отработка trust этого раунда
+    # (objection уже залогирован выше) — цикл не удлиняем. Нет file_id / видео не
+    # ушло → ПОЛНЫЙ фолбэк на обычную trust-директиву ниже (продажа не теряется).
+    if otype == "trust":
+        try:
+            shown = await events_count_recent(user.id, "soc_proof_shown", 24 * 365) > 0
+        except Exception:
+            shown = True   # не смогли проверить → не спамим видео, идём обычным путём
+        # file_id есть в bot_meta? проверяем ДО подводки, чтобы не пообещать «покажу»
+        # впустую (на Render его нет, пока продюсер не засеял) → обычная отработка.
+        if not shown and bool(await get_meta("socproof_video_file_id")):
+            pre = ("Слышу тебя. И не спорю — обещаний вокруг тьма, каждый второй "
+                   "клянётся спасти. Поэтому доказывать на словах не стану — покажу. "
+                   "Вот живой кусок настоящей работы: как это идёт по-честному, без "
+                   "блеска и монтажа. Погляди — а потом сама скажешь.")
+            if not await send_voice_reply(message, pre):
+                await message.answer(pre, parse_mode=None)
+            if await send_soc_proof_video(message.bot, message.chat.id):
+                await log_event(user.id, "soc_proof_shown")
+                post = ("Вот так это и происходит — ничего волшебного, просто два "
+                        "живых человека и правда между ними. Ну что, готова "
+                        "попробовать это на себе — в кругу или наедине? Двери ниже.")
+                # Текст обещает ОБЕ двери («в кругу или наедине») → клавиатура обязана
+                # их дать (аудит W2 #1): соц-пруф = пик интента, обе двери оправданы.
+                kbd = _bridge_kbd()
+                if not await send_voice_reply(message, post, kbd):
+                    await message.answer(post, parse_mode=None, reply_markup=kbd)
+                return
+            # видео не ушло (сбой после чтения file_id) → обычная trust-отработка ниже
     # Волна 1, Шаг 10: «подумаю» при уже высокой готовности (offer_readiness≥0.6) →
     # не размазываем директиву, а бьём бинарным дожимом: выбор только КАК (текст №5,
     # дословно, голосом; фолбэк текст) + клавиатура сегмента.
@@ -1507,7 +1575,8 @@ async def on_after_offer(message: Message):
             "день чувствуешь плечо. Или сразу вглубь, наедине, где я берусь за то "
             "самое, что болит. Куда ступить — в круг или ко мне вплотную? Обе двери "
             "ждут ниже.")
-        kbd = await _after_offer_kbd(user.id, u)
+        # Бинарная вилка обещает ОБЕ двери — клавиатура обязана их дать (аудит W2 #1).
+        kbd = _bridge_kbd()
         await log_event(user.id, "binary_close")
         if not await send_voice_reply(message, binary, kbd):
             await message.answer(binary, parse_mode=None, reply_markup=kbd)
@@ -1546,8 +1615,9 @@ async def on_after_offer(message: Message):
             pass
     # Совещание 04.07: рассинхрон сегмента — горячей/глубокой ветке оффер давал
     # обе двери (_bridge_kbd), а отработка возражения схлопывала до одного Клуба,
-    # теряя дверь 1:1. Держим сегментную клавиатуру и здесь (крэш-сейф).
-    kbd = await _after_offer_kbd(user.id, u)
+    # теряя дверь 1:1. Держим сегментную клавиатуру и здесь (крэш-сейф). Волна 2:
+    # свежий depth/hot в возражении и потолок отработок тоже поднимают обе двери.
+    kbd = await _after_offer_kbd(user.id, u, message.text, obj_count)
     if not await send_voice_reply(message, reply, kbd):
         await message.answer(reply, parse_mode=None, reply_markup=kbd)
 

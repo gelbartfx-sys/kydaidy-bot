@@ -20,7 +20,7 @@ from alena_brain import _default_diagnosis, _valid_reply
 from alena_chat import (
     _last_question, _ensure_reply, _EMPTY_REPLY_STUB,
     _should_binary_close, _offer_kbd, _member_offer_kbd, _request_from_cm,
-    CLUB_URL, ONE_ON_ONE_URL,
+    _offer_kbd_kind, CLUB_URL, ONE_ON_ONE_URL,
 )
 
 
@@ -240,6 +240,37 @@ def test_request_from_cm():
     assert _request_from_cm({"true_request_hypothesis": "   "}) is None
 
 
+# ── Волна 2: чистый селектор клавиатуры дожима bridge|club ────────────────────
+def test_offer_kbd_kind():
+    # дефолт (холодный, без свежих слов, до потолка) → club
+    assert _offer_kbd_kind(None, False, False, "ну не знаю даже", 1) == "club"
+    assert _offer_kbd_kind("T1", False, False, None, 0) == "club"
+    # сегмент горячий/глубокий (события/трек) → bridge
+    assert _offer_kbd_kind("T4", False, False, None, 0) == "bridge", "трек T4"
+    assert _offer_kbd_kind(None, True, False, None, 0) == "bridge", "hot-событие"
+    assert _offer_kbd_kind(None, False, True, None, 0) == "bridge", "depth-событие"
+    # свежий depth/hot ПРЯМО в возражении → bridge (кросс-селл вверх)
+    assert _offer_kbd_kind(None, False, False, "хочу с тобой вживую, глубже", 1) == "bridge"
+    assert _offer_kbd_kind(None, False, False, "а сколько это стоит?", 1) == "bridge"
+    # потолок отработок (последняя перед OBJECTION_CAP) → bridge (альтернатива 1:1)
+    assert _offer_kbd_kind(None, False, False, "ну не знаю", OBJECTION_CAP - 1) == "bridge"
+    assert _offer_kbd_kind(None, False, False, "ну не знаю", OBJECTION_CAP) == "bridge"
+    # msg_text=None не роняет
+    assert _offer_kbd_kind(None, False, False, None, 1) == "club"
+
+
+# ── Волна 2: down-sell price + авторитет trust в директивах ───────────────────
+def test_objection_directive_wave2_texts():
+    price = _OBJECTION_DIRECTIVE["price"].lower()
+    # механизм канала «остаться рядом» присутствует
+    assert "канал" in price and "остаться рядом" in price, "down-sell: путь остаться рядом"
+    assert "задёшево" in price, "парадокс «задёшево не дорожат»"
+    # слова-запрета «бесплатно» в директиве нет (эталон №7)
+    assert "бесплатно" not in price, "слово «бесплатно» запрещено"
+    # trust опирается на «покажу» (созвучно соц-пруфу)
+    assert "покажу" in _OBJECTION_DIRECTIVE["trust"].lower(), "trust: не убеждаю — покажу"
+
+
 if __name__ == "__main__":
     test_method_phase_to_step()
     test_clamp_readiness()
@@ -254,7 +285,10 @@ if __name__ == "__main__":
     test_offer_kbd()
     test_member_offer_kbd()
     test_request_from_cm()
+    test_offer_kbd_kind()
+    test_objection_directive_wave2_texts()
     print("OK: funnel_step map + offer_readiness clamp + [[PHASE]] strip + "
           "objection classifier (5 типов) + cap 3 soft-exit + "
           "_valid_reply + _last_question fallback + _ensure_reply + "
-          "binary_close + offer_kbd/member_offer_kbd + request_from_cm")
+          "binary_close + offer_kbd/member_offer_kbd + request_from_cm + "
+          "offer_kbd_kind (bridge|club) + wave2 down-sell/trust директивы")
