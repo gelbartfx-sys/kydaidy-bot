@@ -491,10 +491,50 @@ async def cb_first_step(callback: CallbackQuery):
 
 # ── Вход ──────────────────────────────────────────────────────────────────────
 
+# Тень-гейт (мандат Кая 06.07): ВЕСЬ трафик идёт через тест Тени — это и есть
+# воронка. Открывать встречу с Алёной БЕЗ пройденной Тени с входа мы не будем,
+# иначе воронка ломается. Прошёл Тень → бесплатная demo-встреча (движок продаёт
+# Клуб) остаётся; Клуб = 2 встречи/мес отдельным доступом; позже — «моя Алёна»
+# отдельным платным продуктом. Whitelist — всегда (наши тесты).
+_NEED_SHADOW_TEXT = (
+    "Со мной — только по-настоящему. А для этого мне нужно сперва увидеть, с "
+    "какой Тенью ты сейчас живёшь: иначе разговор пойдёт вслепую.\n\n"
+    "Пройди короткий тест — десять вопросов — и вернёмся к разговору уже по делу.")
+
+
+def _need_shadow_kbd() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌑 Узнать свою Тень", callback_data="quiz")],
+    ])
+
+
+async def _meeting_gate(user) -> str:
+    """→ 'ok' | 'need_shadow'. Whitelist → ok; без пройденной Тени → need_shadow.
+    Крэш-сейф: сбой чтения = ok (не отсекаем реального юзера из-за сбоя D1)."""
+    if _is_unlimited(user):
+        return "ok"
+    try:
+        u = await get_user(user.id)
+        if not (u and u.get("shadow_dist")):
+            return "need_shadow"
+    except Exception:
+        logger.warning("_meeting_gate: get_user failed for %s → allow", user.id,
+                       exc_info=True)
+    return "ok"
+
+
+async def _send_need_shadow(target: Message):
+    await target.answer(_NEED_SHADOW_TEXT + "\n\n— Алёна",
+                        reply_markup=_need_shadow_kbd(), parse_mode=None)
+
+
 async def _entry(target: Message, user):
     """Показывает дисклеймер (один раз) + интро + кнопку «Начать»."""
     if await ai_active_session(user.id):
         await target.answer("Мы уже во встрече — просто пиши, я здесь.")
+        return
+    if await _meeting_gate(user) == "need_shadow":
+        await _send_need_shadow(target)
         return
     rem = await _remaining(user)
     if rem is not None and rem <= 0:
@@ -546,6 +586,10 @@ async def _do_start(callback: CallbackQuery):
         await callback.message.answer("Мы уже во встрече — пиши.")
         await callback.answer()
         return
+    if await _meeting_gate(user) == "need_shadow":
+        await _send_need_shadow(callback.message)
+        await callback.answer()
+        return
     rem = await _remaining(user)
     if rem is not None and rem <= 0:
         await _send_exhausted(callback.message)
@@ -577,24 +621,37 @@ async def _do_start(callback: CallbackQuery):
              "и поищем настоящее. Говори как есть — голосом или текстом. Я "
              "отвечаю вслух. Замолчу на минуту — значит, думаю. Итак: с чем "
              "ты сейчас, что привело?")
-    if await send_voice_reply(callback.message, frame):
-        await log_event(user.id, "voice_reply", "opener")
-        await callback.message.answer(
-            "Мой вопрос:\n\n«С чем ты сейчас? Что привело?»\n\n"
-            "Ответь как тебе удобно 🎙", parse_mode=None)
-    else:
-        await callback.message.answer(
-            "Привет. Пара слов о том, кто перед тобой: формул счастья я не "
-            "раздаю и по голове гладить не буду. Я сама когда-то решила, что "
-            "близость не для меня, — пока не поняла, что это была защита, а "
-            "не выбор.\n\n"
-            "Это твоя пробная встреча: бесплатная, одна, с глазу на глаз. То, "
-            "что скажешь первым, — ещё не всё; под этим и поищем настоящее.\n\n"
-            "Говори как есть — текстом или голосовым. Я читаю и отвечаю "
-            "голосом. Замолчу на минуту — не исчезла, думаю.\n\n"
-            "Итак: с чем ты сейчас, что привело?\n\n— Алёна",
-            reply_markup=_pause_kbd(),
-        )
+    # Встреча УЖЕ открыта (сессия создана выше). Сбой отправки опенера НЕ должен
+    # всплывать как «не удалось открыть встречу» (_ALENA_FAIL) — это вводило в
+    # заблуждение (баг вскрыт на тесте 06.07). Ловим тут, мягко просим написать.
+    try:
+        if await send_voice_reply(callback.message, frame):
+            await log_event(user.id, "voice_reply", "opener")
+            await callback.message.answer(
+                "Мой вопрос:\n\n«С чем ты сейчас? Что привело?»\n\n"
+                "Ответь как тебе удобно 🎙", parse_mode=None)
+        else:
+            await callback.message.answer(
+                "Привет. Пара слов о том, кто перед тобой: формул счастья я не "
+                "раздаю и по голове гладить не буду. Я сама когда-то решила, что "
+                "близость не для меня, — пока не поняла, что это была защита, а "
+                "не выбор.\n\n"
+                "Это твоя пробная встреча: бесплатная, одна, с глазу на глаз. То, "
+                "что скажешь первым, — ещё не всё; под этим и поищем настоящее.\n\n"
+                "Говори как есть — текстом или голосовым. Я читаю и отвечаю "
+                "голосом. Замолчу на минуту — не исчезла, думаю.\n\n"
+                "Итак: с чем ты сейчас, что привело?\n\n— Алёна",
+                reply_markup=_pause_kbd(),
+            )
+    except Exception:
+        logger.warning("opener send failed AFTER session open for %s", user.id,
+                       exc_info=True)
+        try:
+            await callback.message.answer(
+                "Я здесь, встреча открыта. Напиши, с чем ты сейчас — и я отвечу.",
+                parse_mode=None)
+        except Exception:
+            pass
     await callback.answer()
 
 
