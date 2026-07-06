@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import brain_cascade
 from alena_persona import (
@@ -64,6 +65,26 @@ _SCORE_EN = {
     "ж": "heat", "о": "open", "с": "resist", "ц": "value",
     "heat": "heat", "open": "open", "resist": "resist", "value": "value",
 }
+
+
+def _valid_reply(raw) -> str | None:
+    """Валидатор реплики каскада: пропускает только живую русскую речь Алёны.
+
+    Отсекает мусор моделей — пусто, англ. отказ («I cannot…»/«I can't…»),
+    JSON-огрызок ('{…'/'[…'/'"role":…'), слишком короткое (<20). Невалид → None
+    (каскад берёт следующий слой, на дне — static_safe_reply). Модульная функция
+    (тестируемая; аудит воронки 06.07)."""
+    s = (raw or "").strip()
+    if len(s) < 20:
+        return None
+    if s[0] in "{[":
+        return None
+    if not re.search(r"[а-яёА-ЯЁ]", s):
+        return None
+    low = s.lower()
+    if "i cannot" in low or "i can't" in low or '"role":' in low:
+        return None
+    return s
 
 
 def score_to_signals(score: dict | None) -> dict:
@@ -162,7 +183,7 @@ async def respond(directive: str, method_phase: str, name, archetype,
         return await brain_cascade.run_cascade(
             "respond", system, history,
             layer_kwargs={"max_tokens": (500 if voice_mode else 1500), "timeout": 60.0},
-            validate=lambda raw: ((raw or "").strip() or None),
+            validate=_valid_reply,
             safe_default_factory=lambda: static_safe_reply(method_phase),
             tg_id=tg_id,
         )

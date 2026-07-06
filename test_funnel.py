@@ -16,7 +16,8 @@ from alena_persona import (
     extract_phase, classify_objection, objection_directive,
     OBJECTION_CAP, OBJECTION_TYPES, _OBJECTION_DIRECTIVE,
 )
-from alena_brain import _default_diagnosis
+from alena_brain import _default_diagnosis, _valid_reply
+from alena_chat import _last_question, _ensure_reply, _EMPTY_REPLY_STUB
 
 
 # ── Механизм 3: маппинг фаза → шаг воронки (1..12) ────────────────────────────
@@ -125,6 +126,60 @@ def test_objection_directive_per_type_and_cap():
     assert OBJECTION_CAP == 3, "потолок ровно 3 попытки суммарно"
 
 
+# ── Волна 0: валидатор реплики каскада (мусор модели не уходит клиентке) ──────
+def test_valid_reply():
+    # нормальная русская реплика — проходит, вернулась стрипнутой
+    good = "Я рядом. Скажи, что сейчас с тобой происходит на самом деле?"
+    assert _valid_reply("  " + good + "  ") == good
+    # пусто / только пробелы → None
+    assert _valid_reply("") is None
+    assert _valid_reply("   \n  ") is None
+    assert _valid_reply(None) is None
+    # слишком короткое (<20) → None
+    assert _valid_reply("да, слышу") is None
+    # JSON-огрызок ('{' / '[') → None
+    assert _valid_reply('{"role": "assistant", "content": "…текст подлиннее…"}') is None
+    assert _valid_reply('["элемент раз", "элемент два и ещё немного"]') is None
+    # служебный "role": внутри → None (даже без ведущей скобки)
+    assert _valid_reply('текст с утечкой "role": assistant и хвостом подлиннее') is None
+    # английский отказ → None
+    assert _valid_reply("I cannot help you with that request, sorry.") is None
+    assert _valid_reply("Sorry, I can't do that for you right now.") is None
+    # чистая латиница без кириллицы (не речь Алёны) → None
+    assert _valid_reply("this is a long english sentence without cyrillic") is None
+
+
+# ── Волна 0: текст-дублёр — без «?» дублируем ХВОСТ реплики, не шаблон ─────────
+def test_last_question_fallback():
+    # есть вопрос → возвращаем вопрос
+    q = _last_question("Понимаю тебя. А что ты сейчас чувствуешь в теле?")
+    assert q == "А что ты сейчас чувствуешь в теле?"
+    # нет вопроса → хвост реплики (последнее предложение), НЕ None и НЕ шаблон
+    reply = "Ты держишь это в себе давно. И тебе тяжело нести одной."
+    tail = _last_question(reply)
+    assert tail == "И тебе тяжело нести одной."
+    assert not tail.endswith("?")
+    # реплика без финальной пунктуации → возвращается сама (хвост = вся строка)
+    assert _last_question("просто побудь здесь со мной") == "просто побудь здесь со мной"
+    # совсем пусто → None (вызывающий даст ротацию форм)
+    assert _last_question("") is None
+    assert _last_question("   ") is None
+    assert _last_question(None) is None
+    # длинный хвост без «?» обрезается до 200 символов
+    long_tail = "а" * 300
+    out = _last_question(long_tail)
+    assert out is not None and len(out) <= 200
+
+
+# ── Волна 0: пустой reply → заглушка ВСЕГДА (в т.ч. на ходе закрытия) ─────────
+def test_ensure_reply():
+    assert _ensure_reply("") == _EMPTY_REPLY_STUB
+    assert _ensure_reply("   \n ") == _EMPTY_REPLY_STUB
+    assert _ensure_reply(None) == _EMPTY_REPLY_STUB
+    # живой текст не трогаем
+    assert _ensure_reply("Я тебя услышала.") == "Я тебя услышала."
+
+
 if __name__ == "__main__":
     test_method_phase_to_step()
     test_clamp_readiness()
@@ -132,5 +187,9 @@ if __name__ == "__main__":
     test_extract_phase()
     test_classify_objection()
     test_objection_directive_per_type_and_cap()
+    test_valid_reply()
+    test_last_question_fallback()
+    test_ensure_reply()
     print("OK: funnel_step map + offer_readiness clamp + [[PHASE]] strip + "
-          "objection classifier (5 типов) + cap 3 soft-exit")
+          "objection classifier (5 типов) + cap 3 soft-exit + "
+          "_valid_reply + _last_question fallback + _ensure_reply")
