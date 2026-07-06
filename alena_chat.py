@@ -1081,6 +1081,15 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
                 heads = ("Мой вопрос: «%s»", "«%s»", "Вопрос перед глазами: «%s»",
                          "Оставлю здесь: «%s»")
                 await message.answer(heads[turns % len(heads)] % q, parse_mode=None)
+            else:
+                # Реплика без вопроса (зеркало/мысль, или _last_question не выцепил) —
+                # ВСЁ РАВНО даём текст-сигнал, что ход ЕЁ: иначе после голосового
+                # выглядит как «бот замолчал» (фидбек Кая 06.07: «вопрос текстом не
+                # повторила и молчит»). Ротация форм — не робот.
+                cues = ("Я рядом — что из этого отзывается? 🎙",
+                        "Что тут твоё? Скажи как есть — голосом или текстом 🎙",
+                        "Побудь с этим. Твой ход 🎙")
+                await message.answer(cues[turns % len(cues)], parse_mode=None)
         else:
             # Телеметрия отказа голоса: видно В ЧЁМ дело (длина/TTS), а не гадаем.
             await log_event(user.id, "voice_fallback_text", f"len={len(reply)}")
