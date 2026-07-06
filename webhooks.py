@@ -7,6 +7,7 @@ import hmac
 import hashlib
 import logging
 import json
+import os
 from datetime import datetime
 
 from aiohttp import web
@@ -429,4 +430,7 @@ def setup_webhooks(app: web.Application, bot: Bot):
     app.router.add_post("/webhook/tribute", tribute_webhook)
     app.router.add_get("/p/{token}", portrait_route)
     app.router.add_get("/", lambda r: web.Response(text="kydaidy bot is running"))
-    app.router.add_get("/health", lambda r: web.Response(text="ok"))
+    # Маркер версии: Render кладёт sha деплоя в RENDER_GIT_COMMIT — по нему
+    # продюсер сверяет, что в проде живёт именно свежая волна (аудит 06.07).
+    app.router.add_get("/health", lambda r: web.Response(
+        text="ok " + os.environ.get("RENDER_GIT_COMMIT", "")[:7]))
