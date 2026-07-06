@@ -45,6 +45,7 @@ from lead_policy import should_spend_circle, CIRCLE_CREDITS
 from alena_persona import (
     build_system, DISCLAIMER, INTRO, CLOSE_MARK, is_crisis, CRISIS_REPLY,
     extract_request, extract_dossier, extract_score, strip_dangling_markers,
+    extract_phase, classify_objection, objection_directive, OBJECTION_CAP,
 )
 from alena_brain import brain_turn
 from lead_policy import classify
@@ -922,6 +923,11 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
     reply = reply.replace(CLOSE_MARK, "").strip()
     reply, request = extract_request(reply)
     reply, dossier_new = extract_dossier(reply)
+    # State-маркер фазы [[PHASE:…]] (карта 12 шагов): каноничная фаза уже пришла из
+    # диагноза (brain_phase), но если модель вписала маркер в живой текст — вырезаем
+    # ДО отправки, чтобы служебка не утекла в TTS/кружок (полный закрытый [[PHASE]]
+    # не ловится dangling-защитой).
+    reply, _ = extract_phase(reply)
     # Служебный маркер скоринга (Фаза 1): ВСЕГДА вырезаем из reply до отправки,
     # чтобы [[SCORE ...]] не утёк человеку; сигналы кладём в БД (крэш-сейф).
     reply, score = extract_score(reply)
@@ -1168,9 +1174,19 @@ class _AfterOfferFilter(BaseFilter):
 
 @alena_router.message(F.text, _AfterOfferFilter())
 async def on_after_offer(message: Message):
-    """Отработка сомнения после оффера: признать → назвать страх → вернуть к двери."""
+    """Отработка сомнения после оффера: классифицируем возражение → своя продающая
+    ветка (Шаг 9 воронки, единый обработчик). Потолок OBJECTION_CAP отработок
+    суммарно держит _AfterOfferFilter (после него не давим); на самой последней —
+    мягкий выход в директиве. Тип возражения тегаем в событие для /sources."""
     user = message.from_user
-    await log_event(user.id, "objection")
+    otype = classify_objection(message.text)
+    await log_event(user.id, "objection", otype)
+    # Счётчик отработанных возражений суммарно (включая текущее) — 48ч окно как в
+    # _AfterOfferFilter; на потолке objection_directive добавит мягкий выход.
+    try:
+        obj_count = await events_count_recent(user.id, "objection", 48)
+    except Exception:
+        obj_count = 1
     u = await get_user(user.id)
     request = (u or {}).get("last_ai_request") or ""
     last = await ai_last_session(user.id)
@@ -1188,18 +1204,10 @@ async def on_after_offer(message: Message):
         from alena_brain import respond
         name = user.first_name if re.search(r"[а-яА-ЯёЁ]", user.first_name or "") else None
         reply = await respond(
-            f"Она сомневается/возражает после приглашения (её настоящий запрос: "
-            f"«{request}»). Отработай как живой продавец, по шагам: 1) ВСКРОЙ, что "
-            "на самом деле стоит за возражением — деньги, время, страх боли или "
-            "недоверие (к себе, ко мне, к формату); назови это мягко, своими "
-            "словами. 2) ВАЛИДИРУЙ чувство: сопротивление — защита, так психика "
-            "бережёт от перемен, это не слабость. 3) ОТВЕТЬ механизмом: чем "
-            "именно то, что за дверью, снимает ЕЁ конкретный страх — под её "
-            "слова, не общими фразами. 4) Оставь выбор за ней без нажима и "
-            "позови спросить ещё, если что-то осталось. Не оправдывайся, не "
-            "дави, без цен и ссылок. Лещ честности, не уговоры.",
+            objection_directive(otype, request, obj_count),
             "native_offer", name, archetype, history, voice_mode=True, tg_id=user.id)
         reply, _ = extract_request(reply)
+        reply, _ = extract_phase(reply)
         reply = strip_dangling_markers(reply.replace(CLOSE_MARK, "")).strip()
     except Exception:
         logger.warning("objection respond failed", exc_info=True)
@@ -1309,9 +1317,9 @@ async def run_orphan_turn_tick(bot):
                 history, name, archetype, await get_client_model(tg_id),
                 profile, fresh=False, tg_id=tg_id)
             await save_client_model(tg_id, json.dumps(new_cm, ensure_ascii=False))
-            reply = strip_dangling_markers(
+            reply = strip_dangling_markers(extract_phase(
                 extract_score(extract_dossier(extract_request(
-                    reply.replace(CLOSE_MARK, ""))[0])[0])[0]).strip()
+                    reply.replace(CLOSE_MARK, ""))[0])[0])[0])[0]).strip()
             if not reply:
                 continue
             await ai_add_message(sid, tg_id, "model", reply)
