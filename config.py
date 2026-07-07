@@ -100,6 +100,11 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite+aiosqlite:///./kydaidy.db"
 
+    # 🔒 РЕШЕНИЕ КАЯ (07.07.2026): воркбук «Манифест 7» СНЯТ с отдельной продажи —
+    # живёт ТОЛЬКО как бонус внутри Клуба (доступ по подписке manifest_club, см.
+    # manifest7_guide._has_access). НЕ добавлять в VALID_PRODUCT_CODES и не строить
+    # оффер на эту цену. Значение оставлено лишь для обратной классификации легаси-
+    # оплат в webhooks. Саму витрину-продукт в Tribute деактивирует Кай (dashboard).
     manifest_7_price: int = 1990
     manifest_club_price: int = 990
     manifest_plus_price: int = 4990
