@@ -98,8 +98,6 @@ class Settings(BaseSettings):
     webhook_path: str = "/tg-webhook"
     port: int = 8080
 
-    database_url: str = "sqlite+aiosqlite:///./kydaidy.db"
-
     # 🔒 РЕШЕНИЕ КАЯ (07.07.2026): воркбук «Манифест 7» СНЯТ с отдельной продажи —
     # живёт ТОЛЬКО как бонус внутри Клуба (доступ по подписке manifest_club, см.
     # manifest7_guide._has_access). НЕ добавлять в VALID_PRODUCT_CODES и не строить
