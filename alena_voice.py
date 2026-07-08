@@ -342,19 +342,48 @@ _STATUS_URL = "https://api.heygen.com/v1/video_status.get"
 ALENA_AVATAR_ID = "2ab45471e71149b2b07718d17a40fc9b"   # Digital Twin A «Алёна»
 
 
+async def _heygen_upload_audio(mp3: bytes) -> str | None:
+    """Залить mp3 в HeyGen как asset → audio_asset_id (для voice.type=audio).
+    None при сбое → вызывающий падает на HeyGen-TTS."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                "https://upload.heygen.com/v1/asset",
+                data=mp3,
+                headers={"X-Api-Key": settings.heygen_api_key,
+                         "Content-Type": "audio/mpeg"},
+                timeout=aiohttp.ClientTimeout(total=60)) as r:
+                body = await r.json()
+        return ((body or {}).get("data") or {}).get("id") or (body or {}).get("id")
+    except Exception:
+        logger.warning("heygen audio upload failed (fallback to TTS)", exc_info=True)
+        return None
+
+
 async def render_kruzhok(text: str, timeout_min: int = 7) -> bytes | None:
     """Текст → видео твина Алёны (квадрат 720, под video_note). None при сбое.
+
+    ЭТАЛОН (Кай 08.07): озвучка = ElevenLabs (её тембр + дыхание) → HeyGen-аватар
+    липсинкает под РЕАЛЬНЫЙ голос (voice.type=audio), аватар «дышит» на паузах.
+    Фолбэк — HeyGen-TTS (voice.type=text), если ElevenLabs/загрузка не удалась.
 
     Рендер HeyGen ~2–4 мин — вызывать ТОЛЬКО из фоновой задачи, не в такте диалога.
     """
     if not settings.heygen_api_key or not (text or "").strip():
         return None
     headers = {"X-Api-Key": settings.heygen_api_key}
+    # 1) эталонное аудио Алёны → asset HeyGen → voice=audio (её голос + дыхание).
+    voice_block = {"type": "text", "input_text": text.strip(),
+                   "voice_id": settings.alena_voice_id}
+    el_audio = await _elevenlabs_tts(text)
+    if el_audio:
+        asset_id = await _heygen_upload_audio(el_audio)
+        if asset_id:
+            voice_block = {"type": "audio", "audio_asset_id": asset_id}
     payload = {
         "video_inputs": [{
             "character": {"type": "avatar", "avatar_id": ALENA_AVATAR_ID},
-            "voice": {"type": "text", "input_text": text.strip(),
-                      "voice_id": settings.alena_voice_id},
+            "voice": voice_block,
         }],
         "dimension": {"width": 720, "height": 720},
     }
