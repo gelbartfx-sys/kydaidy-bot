@@ -179,7 +179,7 @@ def _pause_kbd() -> None:
 def _club_only_kbd() -> InlineKeyboardMarkup:
     # Один CTA на пике — только Клуб (Hermes #3), без расщепления цен. 1:1 — текстом.
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✦ Войти в Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
+        [InlineKeyboardButton(text="✦ Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
     ])
 
 
@@ -193,7 +193,7 @@ def _menu_kbd() -> InlineKeyboardMarkup:
 
 def _club_kbd() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Войти в Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
+        [InlineKeyboardButton(text="Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
         [InlineKeyboardButton(text="Личные встречи 1:1 — подписка", url=ONE_ON_ONE_URL)],
     ])
 
@@ -1956,19 +1956,26 @@ async def run_dead_session_tick(bot):
                 request = _request_from_cm(await get_client_model(tg_id) or {})
                 # Полный путь закрытия: гасим все активные (гард даблов), сохраняем
                 # запрос, событие, оффер вдогонку в фоне (chat_id == tg_id в личке).
+                # Дедуп (аудит 08.07): оффер уже показан в сессии → НЕ дублируем полный
+                # оффер-путь (голос+кружок+карточка+кнопки) — иначе молчащий клиент
+                # получает стену вдогонку. Закрываем + оставляем дожим-серию.
+                already_offered = await events_count_recent(tg_id, "offer_shown", hours=24) > 0
                 await ai_close_all_active(tg_id)
                 if request:
                     await ai_set_last_request(tg_id, request)
                 await log_event(tg_id, "session_died_silent", str(sid))
-                await _after_close_bg(bot, tg_id, tg_id, request)
+                if already_offered:
+                    await _schedule_followups(tg_id)  # дожим (одна серия на человека)
+                else:
+                    await _after_close_bg(bot, tg_id, tg_id, request)
                 closed += 1
-                # Сирена админу (образец существующих алертов воронки).
+                # Сирена админу. НЕ шлём, когда клиент = сам админ (тест-прогон засоряет).
                 try:
-                    if settings.tg_admin_id:
+                    if settings.tg_admin_id and tg_id != settings.tg_admin_id:
+                        tail = "дубль оффера подавлен" if already_offered else "оффер вдогонку"
                         await bot.send_message(
                             settings.tg_admin_id,
-                            f"⚰️ Сессия умерла молчанием: клиент {tg_id}, "
-                            f"ходов {turns}, оффер отправлен вдогонку")
+                            f"⚰️ Сессия умерла молчанием: клиент {tg_id}, ходов {turns}, {tail}")
                 except Exception:
                     pass
         except Exception:

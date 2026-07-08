@@ -37,7 +37,7 @@ CLUB_URL = "https://t.me/tribute/app?startapp=sULY"
 
 def _club_kbd() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✦ Войти в Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
+        [InlineKeyboardButton(text="✦ Клуб «Манифест» — 990 ₽/мес", url=CLUB_URL)],
     ])
 
 
