@@ -142,13 +142,58 @@ async def _mark_voice_sent(chat_id: int, text: str, sess_id: int | None = None):
             pass
 
 
+async def _elevenlabs_tts(text: str) -> bytes | None:
+    """ЭТАЛОН голоса Алёны (Кай 08.07): ElevenLabs eleven_v3, её тембр + дыхание.
+    Возвращает MP3-байты напрямую. None при сбое → вызывающий падает на HeyGen.
+    Канон: docs/ALENA-VOICE-ETALON.md. Ретрай 3× (429/5xx транзиентны)."""
+    key = settings.elevenlabs_api_key
+    if not key or not (text or "").strip():
+        return None
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{settings.elevenlabs_voice_id}"
+    payload = {
+        "text": text.strip(),
+        "model_id": settings.elevenlabs_model,
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.9,
+                           "style": 0.3, "use_speaker_boost": True},
+    }
+    headers = {"xi-api-key": key, "Content-Type": "application/json",
+               "Accept": "audio/mpeg"}
+    for attempt in range(3):
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(url, json=payload, headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=60)) as r:
+                    if r.status != 200:
+                        body = (await r.text())[:160]
+                        logger.warning("elevenlabs tts попытка %s: HTTP %s: %s",
+                                       attempt + 1, r.status, body)
+                        raise ValueError(f"HTTP {r.status}")
+                    data = await r.read()
+            if data:
+                return data
+            raise ValueError("empty audio")
+        except Exception:
+            if attempt < 2:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            logger.warning("elevenlabs tts failed после 3 попыток (fallback HeyGen)",
+                           exc_info=True)
+            return None
+    return None
+
+
 async def tts_bytes(text: str) -> bytes | None:
     """Текст → байты аудио голосом Алёны. None при любом сбое (фолбэк на текст).
 
-    РЕТРАЙ (05.07): единичный транзиентный сбой /v3/voices/speech (таймаут,
-    HTTP 5xx/429, пустой ответ — например при пиковой нагрузке на HeyGen от
-    параллельной генерации контента) НЕ должен сразу ронять реплику в текст.
-    Пробуем до 3 раз с короткой паузой — голос остаётся дефолтом канала."""
+    ЭТАЛОН (Кай 08.07): основной провайдер — ElevenLabs (её тембр + дыхание v3);
+    HeyGen /v3/voices/speech остаётся ФОЛБЭКОМ при сбое ElevenLabs/без ключа.
+
+    РЕТРАЙ (05.07): единичный транзиентный сбой TTS (таймаут, HTTP 5xx/429,
+    пустой ответ) НЕ должен сразу ронять реплику в текст."""
+    # 1) ElevenLabs — эталонный голос. Пусто → падаем на HeyGen ниже.
+    el = await _elevenlabs_tts(text)
+    if el:
+        return el
     if not settings.heygen_api_key or not (text or "").strip():
         return None
     payload = {"text": text.strip(), "voice_id": settings.alena_voice_id}

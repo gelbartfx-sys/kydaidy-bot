@@ -71,10 +71,15 @@ class Settings(BaseSettings):
     # /voices/speech (голос Digital Twin Алёны, ~бесплатно, ключ уже в Render).
     # Крэш-сейф: любой сбой TTS → тот же ответ текстом, ход не теряется.
     voice_replies_enabled: bool = True
-    alena_voice_id: str = "05f5549c38234b74a65c46a0c8937b5e"  # голос твина A «Алёна» (Кай 05.07: вернуть прежний, не #3)
-    # Темп речи Алёны (мандат Кая 04.07: «чуть ускорить, 1.1 — хорошо»).
-    # Применяется ffmpeg'ом при перекоде в OGG/Opus; 1.0 = без ускорения.
-    voice_tempo: float = 1.1
+    alena_voice_id: str = "05f5549c38234b74a65c46a0c8937b5e"  # HeyGen твин A (фолбэк)
+    # ЭТАЛОН голоса Алёны (Кай 08.07): ElevenLabs eleven_v3, клон из v2-выпечки —
+    # её тембр + живое дыхание. Канон: docs/ALENA-VOICE-ETALON.md. Основной провайдер
+    # диалога; HeyGen остаётся фолбэком при сбое/без ключа.
+    elevenlabs_api_key: str = ""
+    elevenlabs_voice_id: str = "QCHE6gYW95xAeaQSOngL"
+    elevenlabs_model: str = "eleven_v3"
+    # Темп речи. Эталон v3 сам даёт паузы/дыхание → 1.0 (Кай 08.07: 1.1 быстро).
+    voice_tempo: float = 1.0
 
     # ── Дожим после оффера (Волна 1: H6/H7) ──────────────────────────────────
     # Не купила после закрытия встречи → серия из 3 касаний: ~45 мин (голосовое),
