@@ -2071,6 +2071,14 @@ async def _offer_kruzhok(bot, chat_id: int, tg_id: int,
                 pass
         if sent:
             await log_event(tg_id, "offer_kruzhok", "sent")
+            # Демо Клуба (Кай 09.07): разбор «The Best Offer» — показать, ЧТО покупает.
+            # Гейт по config (пусто = не шлём, пока не готов ролик с новым голосом).
+            if settings.club_demo_file_id:
+                try:
+                    await bot.send_video(chat_id, settings.club_demo_file_id)
+                    await log_event(tg_id, "club_demo_sent")
+                except Exception:
+                    logger.warning("club demo send failed", exc_info=True)
             await bot.send_message(
                 chat_id, card, reply_markup=kbd, parse_mode=None)
             return
