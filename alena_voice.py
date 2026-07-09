@@ -308,11 +308,15 @@ async def _to_video_note(mp4: bytes) -> tuple[bytes, int, int | None]:
             f.write(mp4)
             src = f.name
         dst = src.replace(".mp4", "_vn.mp4")
+        # Кроп (Кай 09.07): HeyGen паддит портрет до квадрата СВЕТЛЫМИ полосами по
+        # бокам → в кружке «белая рамка». Кропим центр 80% (убираем полосы) + лицо
+        # крупнее, чуть вверх (лицо в верхней части кадра). Затем квадрат 640.
+        crop = "crop=ih*0.80:ih*0.80:(iw-ih*0.80)/2:ih*0.03"
         if abs(tempo - 1.0) >= 0.01:
-            fc = (f"[0:v]setpts=PTS/{tempo:.2f},scale=640:640[v];"
+            fc = (f"[0:v]setpts=PTS/{tempo:.2f},{crop},scale=640:640[v];"
                   f"[0:a]atempo={tempo:.2f}[a]")
         else:
-            fc = "[0:v]scale=640:640[v];[0:a]anull[a]"
+            fc = f"[0:v]{crop},scale=640:640[v];[0:a]anull[a]"
         ok = await _run_ffmpeg(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src,
              "-filter_complex", fc, "-map", "[v]", "-map", "[a]",

@@ -2210,9 +2210,10 @@ async def _do_after_close(bot, chat_id: int, tg_id: int, first_name: str | None,
             kbd = _offer_kbd()
             card = _OFFER_CARD
             fallback = _OFFER_FALLBACK_TEXT
-        # (а) тизер №1 голосом + клавиатура сегмента (кнопка уже с тизером — мандат Кая).
-        if not await _ac_speak(bot, chat_id, message, _OFFER_TEASER, kbd):
-            await _ac_say(bot, chat_id, message, _OFFER_TEASER, kbd)
+        # (а) тизер №1 голосом БЕЗ кнопок (Кай 09.07: оффер только ПОД кружком —
+        # кнопки на тизере + на карточке = задвоение). Кнопки идут один раз — с карточкой.
+        if not await _ac_speak(bot, chat_id, message, _OFFER_TEASER, None):
+            await _ac_say(bot, chat_id, message, _OFFER_TEASER, None)
         # (б) оффер-кружок сегментным скриптом → (в) карточка сегмента + kbd (внутри).
         asyncio.create_task(_offer_kruzhok(bot, chat_id, tg_id, script, kbd, card, fallback))
         # Нудж канала/дожим — не члену (он уже внутри Клуба). Канал-надж — только
