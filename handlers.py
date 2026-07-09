@@ -363,22 +363,19 @@ async def _prompt_shadow_photo(message: Message, dist: str):
 # старый эталон gen_circle.py), голос = ElevenLabs-клон QCHE (эталон 08.07).
 # 09.07: W·Q·H·M·MR ПЕРЕОЗВУЧЕНЫ новым голосом + вертикальный кроп (салважем уже
 #   отрендеренных видео — центр-квадрат из портрета-в-квадрате, без api-кредитов).
-# ⏳ R·O·D·C·F — ещё СТАРЫЙ голос: рендер провалился на MOVIO_INSUFFICIENT_CREDIT
-#   (нужны api-кредиты HeyGen). Как Кай пополнит → scratchpad/kruzhki/arch/run_batch.sh
-#   (уже правит: портрет 720×1280 + центр-кроп) добьёт эти 5 → перевшить file_id.
+# ✅ 09.07 вечер: ВСЕ 10 перегенерены run_batch.sh v2 — голос QCHE6/eleven_v3,
+#   портрет 720×1280 + верхний центр-кроп 640, avatar 2ab45471 (твин A).
 _KRUZHOK_FILE_IDS: dict[str, str] = {
-    "W": "DQACAgUAAxkDAAIFdWpPGsEvMx3qhZbr_-HPKmfLU7-8AALEHwACRw6BVtOY__Nl3_60PAQ",
-    "Q": "DQACAgUAAxkDAAIFdmpPGsYu8ngvmcE1FJE83wFiXItoAALFHwACRw6BVvo8H2KCenXdPAQ",
-    "H": "DQACAgUAAxkDAAIFd2pPGspG_Wvtld2xNYt1auyoM8P7AALHHwACRw6BVohLOqAaGV5lPAQ",
-    "M": "DQACAgUAAxkDAAIFeGpPGtmOJCDNZ5j72BwJNBIjfff7AALIHwACRw6BVt4ZmdrJ16a1PAQ",
-    "MR": "DQACAgUAAxkDAAIFeWpPGt2a3an8GPgCqfaV6ItflEDYAALJHwACRw6BVjl5cQzi0faOPAQ",
-    # C·F·R перегенерены 09.07 (ElevenLabs QCHE6gYW, MCP avatar_v, 1:1 квадрат, twin A).
-    "C": "DQACAgUAAxkDAAIFempPG84H_Ujy7yG4yizp-ixLjEJCAALQHwACRw6BVrRNT99iXZRhPAQ",
-    "F": "DQACAgUAAxkDAAIFfGpPG9xzSRILi8dAMo5thjDXErDTAALTHwACRw6BVl7_kXPBgW3vPAQ",
-    "R": "DQACAgUAAxkDAAIFfWpPHFn7MHSr5cgsXMSKILwqsZD6AALZHwACRw6BVrOuGKhaTQGlPAQ",
-    # ⏳ D·O — старый голос, ждут кредитов (Avatar V ~75 кред/шт, баланс исчерпан):
-    "D": "DQACAgUAAxkDAAIFrmpPO0iQ5qVx3GwxAV8JlBRCX44rAAJjIAACRw6BVpVNBV16XxVKPAQ",
-    "O": "DQACAgUAAxkDAAIFr2pPO4sRQTZA3g_Li1gkYabNbUUOAAJmIAACRw6BVktSH-tA801lPAQ",
+    "W": "DQACAgUAAxkDAAIFwGpPkpQY3ln8KvssDW6zdMRg8cGHAALmIQACRw6BVtPaQpndvX2MPAQ",
+    "Q": "DQACAgUAAxkDAAIFwWpPktnHem-POzw6YoDJz9fikTWYAALoIQACRw6BVgxA-jyqCHbTPAQ",
+    "H": "DQACAgUAAxkDAAIFwmpPkxyAN5HZ4omnlTB8Aqetk0cVAALpIQACRw6BVhZtDA5OmCZdPAQ",
+    "M": "DQACAgUAAxkDAAIFw2pPk2K2QcdjHgb4-P0fDXueIfV4AALqIQACRw6BVtK4S4UpZIsIPAQ",
+    "MR": "DQACAgUAAxkDAAIFxGpPk6OAUC39uxACz06BISurnZ0AA-shAAJHDoFW9V8z80DryyQ8BA",
+    "R": "DQACAgUAAxkDAAIFxWpPk-85EWhFqhZnvJgYN8Z-WxGOAALsIQACRw6BVjbcTrm-ZuHTPAQ",
+    "O": "DQACAgUAAxkDAAIFxmpPlDr80arbeo9kx7QtmL8eUZArAALuIQACRw6BVtDjiHrYDOglPAQ",
+    "D": "DQACAgUAAxkDAAIFx2pPlJmClW2AyQ-c8prd3COk5zBxAALwIQACRw6BVvC78p1_QKcePAQ",
+    "C": "DQACAgUAAxkDAAIFyGpPlNzf9DL5Wp_TTXRn-YjIGu1DAALxIQACRw6BVn3ceAcDvEymPAQ",
+    "F": "DQACAgUAAxkDAAIFyWpPlSxHSvPbWtWl9Ll6XfEmW_2xAAL1IQACRw6BVhTEnlhCuKtvPAQ",
 }
 
 
