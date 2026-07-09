@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     nurture_day INTEGER DEFAULT 0,
     nurture_active INTEGER DEFAULT 0,
     last_nurture_at TIMESTAMP,
+    ref_seller TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS purchases (
@@ -16,6 +17,7 @@ CREATE TABLE IF NOT EXISTS purchases (
     product_code TEXT,
     amount INTEGER,
     tribute_payment_id TEXT,
+    ref_seller TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS subscriptions (

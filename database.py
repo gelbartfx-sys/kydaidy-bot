@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS users (
     lead_track TEXT,
     circle_credits_spent INTEGER DEFAULT 0,
     lead_updated_at TIMESTAMP,
+    ref_seller TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS purchases (
     product_code TEXT,
     amount INTEGER,
     tribute_payment_id TEXT,
+    ref_seller TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (tg_id) REFERENCES users(tg_id)
 );
@@ -330,6 +332,10 @@ _RUNTIME_MIGRATIONS = (
     # method_phase, track). ALTER «duplicate column» после первого прогона ловит
     # try/except в init_db — деградирует только эта фича, не весь бот.
     "ALTER TABLE users ADD COLUMN client_model TEXT",
+    # ── SELLer-атрибуция: реф-продавец на юзере (first-touch) + снапшот в покупке.
+    # ?start=ref_<sellerId> → продажа несёт продавца для сверки %. Крэш-сейф ALTER.
+    "ALTER TABLE users ADD COLUMN ref_seller TEXT",
+    "ALTER TABLE purchases ADD COLUMN ref_seller TEXT",
     # ── Служебное key-value бота (напр. дата последнего кредит-алерта HeyGen,
     # чтобы не спамить Каю чаще раза в день на уровень). Крэш-сейф как остальные.
     """CREATE TABLE IF NOT EXISTS bot_meta (
@@ -775,6 +781,23 @@ async def set_user_source(tg_id: int, source: str | None):
         logger.warning("set_user_source failed (continuing)", exc_info=True)
 
 
+async def set_user_ref_seller(tg_id: int, seller: str | None):
+    """First-touch: пишем реф-продавца SELLer только если ещё не записан.
+
+    Крэш-сейф, как set_user_source: если колонки нет — тихо деградируем, не
+    ломая /start. Строка users создаётся upsert_user раньше в хендлере.
+    """
+    if not seller:
+        return
+    try:
+        await _exec(
+            "UPDATE users SET ref_seller = ? WHERE tg_id = ? AND ref_seller IS NULL",
+            (seller, tg_id),
+        )
+    except Exception:
+        logger.warning("set_user_ref_seller failed (continuing)", exc_info=True)
+
+
 async def source_stats():
     """Воронка по источникам (трекинг трафика): пришли → прошли тест Тени → получили портрет → оплатили.
 
@@ -852,9 +875,11 @@ async def get_users_for_nurture():
 # ── Покупки / подписки ───────────────────────────────────────────────────────
 
 async def add_purchase(tg_id: int, product_code: str, amount: int, payment_id: str):
+    # ref_seller тянем из юзера в момент покупки — продажа несёт продавца (SELLer-сверка).
     await _exec(
-        "INSERT INTO purchases (tg_id, product_code, amount, tribute_payment_id) VALUES (?, ?, ?, ?)",
-        (tg_id, product_code, amount, payment_id),
+        "INSERT INTO purchases (tg_id, product_code, amount, tribute_payment_id, ref_seller) "
+        "VALUES (?, ?, ?, ?, (SELECT ref_seller FROM users WHERE tg_id = ?))",
+        (tg_id, product_code, amount, payment_id, tg_id),
     )
 
 

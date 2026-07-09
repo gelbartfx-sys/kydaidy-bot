@@ -39,7 +39,7 @@ from database import (
     upsert_user, get_user, start_nurture, stop_nurture, get_user_purchases,
     set_tribute_post, get_tribute_post,
     has_generated_shadow, mark_shadow_generated, save_shadow_dist,
-    set_user_source, source_stats, log_event, event_counts,
+    set_user_source, set_user_ref_seller, source_stats, log_event, event_counts,
 )
 from content_data import (
     POVOROT_RESULTS,
@@ -286,6 +286,16 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         await upsert_user(user.id, user.username, user.first_name)
         from booking import start_booking
         await start_booking(message)
+        return
+
+    # SELLer-реферал: ?start=ref_<sellerId> → привязать продавца (first-touch).
+    # ВАЖНО: ДО _split_source — иначе атрибуция съест токен как метку источника.
+    if args.startswith("ref_"):
+        seller = args[len("ref_"):][:64]
+        await upsert_user(user.id, user.username, user.first_name)
+        if seller and seller.replace("_", "").replace("-", "").isalnum():
+            await set_user_ref_seller(user.id, seller)
+        await message.answer(WELCOME_NO_POVOROT, reply_markup=_main_menu_keyboard())
         return
 
     args, source = _split_source(args)
