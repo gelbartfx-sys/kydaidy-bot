@@ -164,6 +164,11 @@ class Settings(BaseSettings):
     stale_nudge_enabled: bool = True
     stale_nudge_minutes: int = 20      # сколько человек молчит до нуджа
     stale_nudge_tick_min: int = 5      # как часто джоб проверяет затихшие встречи
+    # Re-engage (Кай 09.07): ДО оффер-нуджа — мягкое «я тут, жду тебя, мы во встрече»,
+    # если человек затих. НЕ продажа, возврат в сессию. Одно на встречу. Окно:
+    # [reengage_minutes, stale_nudge_minutes) — раньше оффера, не мешая ему.
+    reengage_enabled: bool = True
+    reengage_minutes: int = 6          # сколько молчит до мягкого возвращения
     # Батч Б: если client_model от мозга помечает встречу как ПИК (peak=true),
     # нудж уходит раньше (замолчала «на нерве» — успеть, пока горячо). Нет поля /
     # обычная встреча → работает stale_nudge_minutes.

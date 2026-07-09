@@ -29,7 +29,7 @@ from handlers import router
 from manifest7_guide import guide_router
 from alena_chat import (alena_router, run_stale_session_tick,
                         run_orphan_turn_tick, run_club_ladder_tick,
-                        run_dead_session_tick)
+                        run_dead_session_tick, run_reengage_tick)
 from heygen_credits import run_credit_check
 from booking import book_router
 from calendly import reconcile_tick as calendly_reconcile_tick
@@ -171,6 +171,10 @@ async def main():
     # порог молчания (stale_nudge_minutes) фильтрует сам запрос.
     scheduler.add_job(
         run_stale_session_tick, "interval",
+        minutes=settings.stale_nudge_tick_min, args=[bot])
+    # Re-engage (Кай 09.07): мягкое «я тут, жду» ДО оффер-нуджа, если человек затих.
+    scheduler.add_job(
+        run_reengage_tick, "interval",
         minutes=settings.stale_nudge_tick_min, args=[bot])
     # T-1 (03.07): само-восстановление хода, убитого редеплоем (реплика клиентки
     # без ответа >2 мин) — доотвечаем сами, тишина себя чинит.

@@ -35,6 +35,7 @@ from database import (
     ai_close_session, ai_close_all_active, ai_session_idle_minutes,
     ai_set_last_request, save_dossier,
     ai_stale_sessions, ai_orphan_sessions, ai_dead_sessions,
+    ai_reengage_sessions, ai_mark_reengaged,
     ai_mark_nudged, save_lead_signals, set_lead_track,
     get_client_model, save_client_model, get_meta,
     log_event, followup_schedule, get_lead_signals, add_circle_credits,
@@ -1852,6 +1853,46 @@ async def run_orphan_turn_tick(bot):
     if healed:
         logger.info("orphan tick: восстановлено ходов — %s", healed)
     return healed
+
+
+_REENGAGE_VOICE = (
+    "Я тут, никуда не делась — мы с тобой всё ещё во встрече. Не тороплю, но и "
+    "прятаться не дам: что бы сейчас ни поднялось внутри, скажи как есть — словом, "
+    "голосом, как удобно. Даже одно слово. Я рядом и жду тебя.")
+_REENGAGE_TEXT = (
+    "Я тут, мы всё ещё во встрече 🕯 Не спеши — но не прячься. Ответь как есть, "
+    "хоть одним словом. Я рядом.\n\n— Алёна")
+
+
+async def run_reengage_tick(bot):
+    """Re-engage (Кай 09.07): ДО оффер-нуджа — мягкое возвращение в сессию, если
+    человек затих. НЕ продажа, БЕЗ кнопок: «я тут, жду тебя». Одно на встречу
+    (метка reengaged_at). Окно [reengage_minutes, stale_nudge_minutes)."""
+    if not settings.reengage_enabled:
+        return 0
+    rows = await ai_reengage_sessions(settings.reengage_minutes)
+    sent = 0
+    for r in rows:
+        sid, tg_id = r.get("session_id"), r.get("tg_id")
+        if not sid or not tg_id:
+            continue
+        idle = await ai_session_idle_minutes(sid)
+        # Окно: затих ≥ reengage_minutes, но ещё НЕ дозрел до оффер-нуджа (иначе
+        # уместнее оффер, не возврат). Пик обрабатывает stale-нудж раньше — тут не лезем.
+        if idle is None or idle < settings.reengage_minutes \
+                or idle >= settings.stale_nudge_minutes:
+            continue
+        await ai_mark_reengaged(sid)  # метим ДО отправки (антидубль)
+        try:
+            if not await send_voice_to(bot, tg_id, _REENGAGE_VOICE, None):
+                await bot.send_message(tg_id, _REENGAGE_TEXT, parse_mode=None)
+            await log_event(tg_id, "reengage_nudge", str(sid))
+            sent += 1
+        except Exception:
+            logger.warning("reengage send failed for %s", tg_id, exc_info=True)
+    if sent:
+        logger.info("reengage: вернул в сессию %s тихих встреч", sent)
+    return sent
 
 
 async def run_stale_session_tick(bot):
