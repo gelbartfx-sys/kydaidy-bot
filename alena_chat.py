@@ -1448,32 +1448,10 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
                 if not q and turns <= 1:
                     await message.answer("Ответь, как есть — текстом или голосовым 🎙",
                                          parse_mode=None)
-            # W7: чекпойнт пути на 5-м ходу — ощущение «меня ведут» (карта прогресса
-            # из модели клиентки). Только в brain-пути и если есть чем наполнить.
-            if turns == 5 and settings.brain_v2_enabled:
-                try:
-                    cm_now = await get_client_model(user.id) or {}
-                    came = (cm_now.get("facade_lie") or "").strip()
-                    seen = (cm_now.get("true_request_hypothesis") or "").strip()
-                    if came or seen:
-                        # Мандат Кая 03.07: чекпойнт — тоже её речь → голосом, фолбэк текст.
-                        spoken = "Смотри, куда мы дошли. "
-                        if came:
-                            spoken += f"Ты пришла с «{came[:120]}». "
-                        if seen:
-                            spoken += f"А под этим уже проступает настоящее: «{seen[:120]}». "
-                        spoken += "Осталось главное. Идём."
-                        if not await send_voice_reply(message, spoken):
-                            parts = ["🗺 Смотри, куда мы дошли:"]
-                            if came:
-                                parts.append(f"— ты пришла с «{came[:120]}»")
-                            if seen:
-                                parts.append(f"— а под этим уже проступает настоящее: «{seen[:120]}»")
-                            parts.append("Осталось главное. Идём.")
-                            await message.answer("\n".join(parts), parse_mode=None)
-                        await log_event(user.id, "checkpoint_shown")
-                except Exception:
-                    logger.warning("checkpoint failed (continuing)", exc_info=True)
+            # (П4, мандат Кая 09.07) Чекпойнт «Смотри, куда дошли… Осталось главное. Идём.»
+            # на 5-м ходу УБРАН: он слал ЛИШНЕЕ сообщение сразу после голосового с
+            # вопросом — юзер не успевал ответить, вопрос проскакивал. Воронка идёт
+            # пошагово реактивно (вопрос → ждём ответ юзера → продолжение темы).
 
 
 # ── Голосовой ввод: человек отвечает голосом → распознаём → тот же ход ────────

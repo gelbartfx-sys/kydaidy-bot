@@ -372,10 +372,11 @@ _KRUZHOK_FILE_IDS: dict[str, str] = {
     "H": "DQACAgUAAxkDAAIFd2pPGspG_Wvtld2xNYt1auyoM8P7AALHHwACRw6BVohLOqAaGV5lPAQ",
     "M": "DQACAgUAAxkDAAIFeGpPGtmOJCDNZ5j72BwJNBIjfff7AALIHwACRw6BVt4ZmdrJ16a1PAQ",
     "MR": "DQACAgUAAxkDAAIFeWpPGt2a3an8GPgCqfaV6ItflEDYAALJHwACRw6BVjl5cQzi0faOPAQ",
-    # ⏳ старый голос (ждут api-кредитов, см. коммент выше):
-    "C": "DQACAgUAAxkDAAIB52pE9OHWg50qgUg3j65apkEjn2oAA7ciAAI7iylWU8ijvXLP9OM8BA",
-    "F": "DQACAgUAAxkDAAIB6WpE9PNvG1uo9jREw-T8weqQVbCHAAK5IgACO4spVkoDRu5PgGWNPAQ",
-    "R": "DQACAgUAAxkDAAIB6mpE9P-xlddKgUM9Y3_251-u5P-NAAK6IgACO4spVu1CSHRs-u3LPAQ",
+    # C·F·R перегенерены 09.07 (ElevenLabs QCHE6gYW, MCP avatar_v, 1:1 квадрат, twin A).
+    "C": "DQACAgUAAxkDAAIFempPG84H_Ujy7yG4yizp-ixLjEJCAALQHwACRw6BVrRNT99iXZRhPAQ",
+    "F": "DQACAgUAAxkDAAIFfGpPG9xzSRILi8dAMo5thjDXErDTAALTHwACRw6BVl7_kXPBgW3vPAQ",
+    "R": "DQACAgUAAxkDAAIFfWpPHFn7MHSr5cgsXMSKILwqsZD6AALZHwACRw6BVrOuGKhaTQGlPAQ",
+    # ⏳ D·O — старый голос, ждут кредитов (Avatar V ~75 кред/шт, баланс исчерпан):
     "D": "DQACAgUAAxkDAAIC1mpHhE8PjoQDnyMndlOJ8k-cwN7ZAALUHwACspI4Vg0tLkA39bCvPAQ",
     "O": "DQACAgUAAxkDAAIB72pE9YB0b8aJbbP1Ig9I5ErjrMzlAALAIgACO4spVqPVU3D209AwPAQ",
 }
