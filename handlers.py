@@ -359,21 +359,24 @@ async def _prompt_shadow_photo(message: Message, dist: str):
 
 
 # Видео-кружки под каждую Тень (file_id готового кружка в Telegram). Пусто = не шлём.
-# v8-рецепт (Photo Avatar кабинет + Avatar IV + Motion + голос multilingual_v2). 01.07.
-# Обновлено 01.07: НОВЫЕ Digital Twin (Avatar V, 2 твина, чередование ракурсов),
-# тексты выверены, Кай одобрил. Твины A `2ab45471…` (W·H·F·R·D) / B `ba9b5ad5…` (Q·M·MR·O·C).
+# Твин A `2ab45471…`. Рендер портрет 720×1280 → центр-квадрат 640 (вертикаль как
+# старый эталон gen_circle.py), голос = ElevenLabs-клон QCHE (эталон 08.07).
+# 09.07: W·Q·H·M·MR ПЕРЕОЗВУЧЕНЫ новым голосом + вертикальный кроп (салважем уже
+#   отрендеренных видео — центр-квадрат из портрета-в-квадрате, без api-кредитов).
+# ⏳ R·O·D·C·F — ещё СТАРЫЙ голос: рендер провалился на MOVIO_INSUFFICIENT_CREDIT
+#   (нужны api-кредиты HeyGen). Как Кай пополнит → scratchpad/kruzhki/arch/run_batch.sh
+#   (уже правит: портрет 720×1280 + центр-кроп) добьёт эти 5 → перевшить file_id.
 _KRUZHOK_FILE_IDS: dict[str, str] = {
-    "W": "DQACAgUAAxkDAAIB5mpE9NVsEXSWhFowZiivtWq8z4iPAAK2IgACO4spVouE6Sn7sFoRPAQ",
+    "W": "DQACAgUAAxkDAAIFdWpPGsEvMx3qhZbr_-HPKmfLU7-8AALEHwACRw6BVtOY__Nl3_60PAQ",
+    "Q": "DQACAgUAAxkDAAIFdmpPGsYu8ngvmcE1FJE83wFiXItoAALFHwACRw6BVvo8H2KCenXdPAQ",
+    "H": "DQACAgUAAxkDAAIFd2pPGspG_Wvtld2xNYt1auyoM8P7AALHHwACRw6BVohLOqAaGV5lPAQ",
+    "M": "DQACAgUAAxkDAAIFeGpPGtmOJCDNZ5j72BwJNBIjfff7AALIHwACRw6BVt4ZmdrJ16a1PAQ",
+    "MR": "DQACAgUAAxkDAAIFeWpPGt2a3an8GPgCqfaV6ItflEDYAALJHwACRw6BVjl5cQzi0faOPAQ",
+    # ⏳ старый голос (ждут api-кредитов, см. коммент выше):
     "C": "DQACAgUAAxkDAAIB52pE9OHWg50qgUg3j65apkEjn2oAA7ciAAI7iylWU8ijvXLP9OM8BA",
-    "H": "DQACAgUAAxkDAAIB6GpE9OnLzzB4LLxXV1tK0EUIumyTAAK4IgACO4spVogQilfJMhy-PAQ",
     "F": "DQACAgUAAxkDAAIB6WpE9PNvG1uo9jREw-T8weqQVbCHAAK5IgACO4spVkoDRu5PgGWNPAQ",
     "R": "DQACAgUAAxkDAAIB6mpE9P-xlddKgUM9Y3_251-u5P-NAAK6IgACO4spVu1CSHRs-u3LPAQ",
-    # D перегенерён 03.07: TTS-дефолты + «разруши́тельница» (U+0301) + motionPrompt
-    # моргания (avatar_v). Аудио-эталон: scratchpad/kruzhki/arch/D_regen_v2.mp3.
     "D": "DQACAgUAAxkDAAIC1mpHhE8PjoQDnyMndlOJ8k-cwN7ZAALUHwACspI4Vg0tLkA39bCvPAQ",
-    "Q": "DQACAgUAAxkDAAIB7GpE9VjpcdqeF6wuzrJ_9cajVq-CAAK8IgACO4spVk92J0ehk4XgPAQ",
-    "M": "DQACAgUAAxkDAAIB7WpE9Wej88AE_epZojKjR9W5izUpAAK9IgACO4spVuRvGsb_IrczPAQ",
-    "MR": "DQACAgUAAxkDAAIB7mpE9XYN4kdrKH21sLED6N9hZXrfAAK_IgACO4spVlHC4FrXzg2OPAQ",
     "O": "DQACAgUAAxkDAAIB72pE9YB0b8aJbbP1Ig9I5ErjrMzlAALAIgACO4spVqPVU3D209AwPAQ",
 }
 

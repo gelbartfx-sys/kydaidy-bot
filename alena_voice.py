@@ -308,15 +308,16 @@ async def _to_video_note(mp4: bytes) -> tuple[bytes, int, int | None]:
             f.write(mp4)
             src = f.name
         dst = src.replace(".mp4", "_vn.mp4")
-        # Кроп (Кай 09.07): HeyGen паддит портрет до квадрата СВЕТЛЫМИ полосами по
-        # бокам → в кружке «белая рамка». Кропим центр 80% (убираем полосы) + лицо
-        # крупнее, чуть вверх (лицо в верхней части кадра). Затем квадрат 640.
-        crop = "crop=ih*0.80:ih*0.80:(iw-ih*0.80)/2:ih*0.03"
+        # Кроп (Кай 09.07): HeyGen рендерит ВЕРТИКАЛЬ 720×1280 (как старый эталон
+        # кружков) → берём ВЕРХНИЙ квадрат (лицо вверху кадра, как салважные интро-
+        # кружки W·Q·H·M·MR) = красивая вертикальная композиция. crop=iw:iw:0:0 берёт
+        # квадрат по ширине от верха портрета, затем 640. Все 10 кружков единообразны.
+        crop = "crop=iw:iw:0:0,scale=640:640"
         if abs(tempo - 1.0) >= 0.01:
-            fc = (f"[0:v]setpts=PTS/{tempo:.2f},{crop},scale=640:640[v];"
+            fc = (f"[0:v]setpts=PTS/{tempo:.2f},{crop}[v];"
                   f"[0:a]atempo={tempo:.2f}[a]")
         else:
-            fc = f"[0:v]{crop},scale=640:640[v];[0:a]anull[a]"
+            fc = f"[0:v]{crop}[v];[0:a]anull[a]"
         ok = await _run_ffmpeg(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src,
              "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
@@ -365,7 +366,8 @@ async def _heygen_upload_audio(mp3: bytes) -> str | None:
 
 
 async def render_kruzhok(text: str, timeout_min: int = 7) -> bytes | None:
-    """Текст → видео твина Алёны (квадрат 720, под video_note). None при сбое.
+    """Текст → видео твина Алёны (вертикаль 720×1280 → центр-квадрат в _to_video_note,
+    как старый эталон кружков). None при сбое.
 
     ЭТАЛОН (Кай 08.07): озвучка = ElevenLabs (её тембр + дыхание) → HeyGen-аватар
     липсинкает под РЕАЛЬНЫЙ голос (voice.type=audio), аватар «дышит» на паузах.
@@ -389,7 +391,7 @@ async def render_kruzhok(text: str, timeout_min: int = 7) -> bytes | None:
             "character": {"type": "avatar", "avatar_id": ALENA_AVATAR_ID},
             "voice": voice_block,
         }],
-        "dimension": {"width": 720, "height": 720},
+        "dimension": {"width": 720, "height": 1280},
     }
     try:
         async with aiohttp.ClientSession() as s:
