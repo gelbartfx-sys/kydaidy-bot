@@ -203,10 +203,9 @@ async def _nudge_subscribe_photo(message: Message):
         if _is_unlimited(message.from_user):
             return
         await message.answer(
-            "Пока рисовала тебя — подумала: если захочешь быть рядом между "
-            "встречами, я почти каждый день пишу в канале то, что не влезает в "
-            "переписку — без причёсанного тона, как есть. Не обязательно. Просто "
-            "дверь открыта 🕯",
+            "Пока рисовала твой портрет — вижу всегда больше, чем помещается в одну "
+            "картинку. Часть этого показываю в канале, по чуть-чуть, без повода "
+            "приходить именно сейчас. Просто знай — дверь туда есть 🕯",
             parse_mode=None, reply_markup=_subscribe_kbd())
     except Exception:
         logger.warning("_nudge_subscribe_photo failed (continuing)", exc_info=True)

@@ -1863,6 +1863,18 @@ _REENGAGE_TEXT = (
     "Я тут, мы всё ещё во встрече 🕯 Не спеши — но не прячься. Ответь как есть, "
     "хоть одним словом. Я рядом.\n\n— Алёна")
 
+# Страховка-присутствие на ПИКЕ (Кай 10.07, сигнал-фикс): на пике боли НЕ продаём
+# по таймеру — пик это проживание, оффер триггерит ЕЁ сообщение (close-триггеры в
+# _talk). Если сама не потянулась к stale_nudge_peak_minutes — один тёплый возврат
+# БЕЗ двери/кнопки, чтобы не потерять, но и не давить. Тон отличен от reengage.
+_PEAK_HOLD_VOICE = (
+    "Я всё ещё здесь, рядом с тем, что у тебя поднялось. Не тороплю тебя ни на шаг — "
+    "мы никуда не спешим. Когда захочешь идти дальше, просто скажи мне, и мы пойдём "
+    "оттуда, где остановились.")
+_PEAK_HOLD_TEXT = (
+    "Я всё ещё здесь, рядом с тем, что поднялось 🕯 Не тороплю. Когда захочешь "
+    "дальше — скажи, и пойдём оттуда, где остановились.\n\n— Алёна")
+
 
 async def run_reengage_tick(bot):
     """Re-engage (Кай 09.07): ДО оффер-нуджа — мягкое возвращение в сессию, если
@@ -1903,9 +1915,8 @@ async def run_stale_session_tick(bot):
     """
     if not settings.stale_nudge_enabled:
         return 0
-    # Батч Б: ловим кандидатов уже с ПИК-порога (7 мин) — но обычную встречу нудж
-    # ждёт полный stale_nudge_minutes. Пик (client_model.peak от батча А) шлём раньше:
-    # замолчала «на нерве» → успеть, пока горячо.
+    # Ловим кандидатов с нижней границы порогов (обычно = stale_nudge_minutes, т.к.
+    # пик-порог теперь ВЫШЕ). Каждую встречу гейтим по своему порогу в цикле ниже.
     peak_min = min(settings.stale_nudge_peak_minutes, settings.stale_nudge_minutes)
     rows = await ai_stale_sessions(peak_min)
     sent = 0
@@ -1920,22 +1931,32 @@ async def run_stale_session_tick(bot):
             is_peak = bool((await get_client_model(tg_id) or {}).get("peak"))
         except Exception:
             is_peak = False
-        if not is_peak:
-            idle = await ai_session_idle_minutes(sid)
-            if idle is None or idle < settings.stale_nudge_minutes:
-                continue  # обычная встреча ещё не дозрела до наджа (порог 20 мин)
+        # СИГНАЛ-ФИКС (Кай 10.07): порог пика ВЫШЕ обычного (страховка, не «успеть
+        # пока горячо»). Симметричная проверка простоя для обеих веток.
+        threshold = (settings.stale_nudge_peak_minutes if is_peak
+                     else settings.stale_nudge_minutes)
+        idle = await ai_session_idle_minutes(sid)
+        if idle is None or idle < threshold:
+            continue  # ещё не дозрела до касания по своему порогу
         # Метим ДО отправки: сбой доставки (юзер закрыл личку) не должен крутить
         # нудж на следующем тике — задвоенный outreach хуже одного пропуска.
         await ai_mark_nudged(sid)
         try:
-            # Нудж — единственное место, где кнопка Клуба ВО ВРЕМЯ встречи уместна:
-            # оффер ГОЛОСОМ (мандат 03.07), фолбэк текст с той же кнопкой.
-            if not await send_voice_to(bot, tg_id, _STALE_NUDGE_VOICE,
-                                       _club_only_kbd()):
-                await bot.send_message(tg_id, _STALE_NUDGE_TEXT,
-                                       reply_markup=_club_only_kbd(), parse_mode=None)
-            # Батч Б: session_id в мету события — иначе аудит не сопоставляет надж↔сессию.
-            await log_event(tg_id, "stale_nudge", str(sid))
+            if is_peak:
+                # На пике НЕ продаём по таймеру — оффер триггерит ЕЁ сообщение
+                # (close-триггеры _talk). Тут только тёплая страховка-присутствие
+                # БЕЗ двери/кнопки, если сама не потянулась к порогу пика.
+                if not await send_voice_to(bot, tg_id, _PEAK_HOLD_VOICE, None):
+                    await bot.send_message(tg_id, _PEAK_HOLD_TEXT, parse_mode=None)
+                await log_event(tg_id, "stale_presence_peak", str(sid))
+            else:
+                # Обычная тихая встреча: единственное место, где кнопка Клуба ВО
+                # ВРЕМЯ встречи уместна — оффер ГОЛОСОМ (мандат 03.07), фолбэк текст.
+                if not await send_voice_to(bot, tg_id, _STALE_NUDGE_VOICE,
+                                           _club_only_kbd()):
+                    await bot.send_message(tg_id, _STALE_NUDGE_TEXT,
+                                           reply_markup=_club_only_kbd(), parse_mode=None)
+                await log_event(tg_id, "stale_nudge", str(sid))
             sent += 1
         except Exception:
             logger.warning("stale nudge send failed for %s", tg_id, exc_info=True)
@@ -2167,9 +2188,9 @@ async def _nudge_channel(message: Message, tg_id: int):
         if await _is_subscribed(message.bot, tg_id) is True:
             return
         await message.answer(
-            "И ещё — что бы ты сейчас ни выбрала, я никуда не денусь: в канале "
-            "я рядом каждый день, там честное, без глазури. Если тебя там ещё "
-            "нет — заходи.",
+            "Что бы ты сейчас ни выбрала — то, что между нами случилось, не обязано "
+            "гаснуть на этом сообщении. Я продолжаю тем же голосом в канале, между "
+            "нашими разговорами. Если тебя там ещё нет — заходи.",
             parse_mode=None, reply_markup=_subscribe_kbd())
     except Exception:
         logger.warning("_nudge_channel failed (continuing)", exc_info=True)

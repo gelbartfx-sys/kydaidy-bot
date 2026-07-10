@@ -45,8 +45,9 @@ def _club_kbd() -> InlineKeyboardMarkup:
 # оффера — в касании-45м, отдельным ТЕКСТОМ после голосового (не тратит квоту
 # голосовых и не давит). Ништяк — бесплатные утренние аудио в самом канале.
 _CHANNEL_NUDGE = (
-    "И ещё. Каждое утро я выхожу в канале — короткий голос, бесплатно, "
-    "для всех. Загляни:"
+    "И ещё — то, что было сегодня, не обязано стоить денег, чтобы продолжаться. "
+    "Каждое утро я говорю голосом в канале — бесплатно, без условий. Загляни, "
+    "если хочется остаться на связи:"
 )
 
 
@@ -148,6 +149,18 @@ async def run_followup_tick(bot) -> int:
                 except Exception:
                     logger.warning("channel nudge failed", exc_info=True)
             elif stage == 2:
+                # Соц-пруф живого лица (Кай 10.07): перед питчем Touch2 — фрагмент
+                # эфира, если задан. Бьёт возражение «ты бот?». Своя крэш-сейф обёртка:
+                # сбой видео НЕ должен блокировать основной голос/текст ниже. Пустой
+                # club_demo_file_id → блок пропускается, Touch2 идёт как раньше.
+                if settings.club_demo_file_id:
+                    try:
+                        await bot.send_video(
+                            tg_id, settings.club_demo_file_id,
+                            caption="Из недавнего эфира — такие у нас каждую неделю в Клубе.")
+                        await log_event(tg_id, "touch2_demo_sent")
+                    except Exception:
+                        logger.warning("touch2 demo send failed (continuing)", exc_info=True)
                 # Мандат Кая 03.07: все касания Алёны — голосом, фолбэк текст.
                 if not await send_voice_to(bot, tg_id, _spoken(_TOUCH2_TEXT), _club_kbd()):
                     await bot.send_message(tg_id, _TOUCH2_TEXT,
