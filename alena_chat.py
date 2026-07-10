@@ -1967,12 +1967,7 @@ async def run_stale_session_tick(bot):
             else:
                 # Блок 4 гейт: не квалифицирована → НЕ продаём Клуб по таймеру, шлём
                 # присутствие. Fail-open (флаг OFF → всегда True = как раньше).
-                try:
-                    from purchase_stage import stage_allows_offer
-                    _allow = await stage_allows_offer(tg_id)
-                except Exception:
-                    _allow = True
-                if not _allow:
+                if not await _offer_gate_allows(tg_id):
                     if not await send_voice_to(bot, tg_id, _PEAK_HOLD_VOICE, None):
                         await bot.send_message(tg_id, _PEAK_HOLD_TEXT, parse_mode=None)
                     await log_event(tg_id, "stale_presence_gated", str(sid))
@@ -2246,6 +2241,23 @@ async def _ac_say(bot, chat_id: int, message, text: str, kbd=None):
 # тесно от чужих правил/глаз). Архетип лишь красит слова. Всё за флагом hunt_stage3.
 _HARD_LONER_CODES = {"R", "Q", "H", "C"}  # Бунтарка/Королева/Охотница/Затворница
 
+# Блок 4: тёплое закрытие БЕЗ цены — когда гейт не пустил оффер (не квалифицирована).
+# Греем присутствием + каналом, продажа придёт когда дозреет (сама напишет / подпишется).
+_GATED_WARM_TEXT = (
+    "Сегодня ты сделала важное — увидела, куда на самом деле тянет. Не тороплю ни "
+    "на шаг. Я рядом каждый день в канале, между нашими разговорами — заходи, когда "
+    "захочется. А захочешь пойти дальше — просто напиши мне, и продолжим оттуда, "
+    "где остановились.")
+
+
+async def _offer_gate_allows(tg_id: int) -> bool:
+    """Обёртка гейта квалификации для оффер-путей. Fail-open при любом сбое."""
+    try:
+        from purchase_stage import stage_allows_offer
+        return await stage_allows_offer(tg_id)
+    except Exception:
+        return True  # fail-open
+
 
 def _archetype_code(u_row) -> str | None:
     """Ведущий код Тени из shadow_dist юзера. Крэш-сейф → None."""
@@ -2263,7 +2275,7 @@ async def _door_lean_by_temp(tg_id: int, u_row) -> str:
     """Дверь по температуре (Кай 10.07): 'one_on_one' ТОЛЬКО если стадия hot И
     архетип — жёсткая одиночка. Иначе 'club'. Крэш-сейф → 'club'."""
     try:
-        from purchase_stage import get_purchase_stage
+        from database import get_purchase_stage
         stage = await get_purchase_stage(tg_id)
         code = _archetype_code(u_row)
         if stage == "hot" and code in _HARD_LONER_CODES:
@@ -2325,23 +2337,13 @@ async def _do_after_close(bot, chat_id: int, tg_id: int, first_name: str | None,
         # Греем присутствием + каналом, followup-серию НЕ ставим (не давим ценой
         # холодную). Fail-open: флаг OFF / whitelist / None-стадия → пропускает как
         # раньше (stage_allows_offer вернёт True). На пике оффер и так не звучит.
-        if not is_member:
-            try:
-                from purchase_stage import stage_allows_offer
-                _allowed = await stage_allows_offer(tg_id)
-            except Exception:
-                _allowed = True  # fail-open
-            if not _allowed:
-                await log_event(tg_id, "offer_gated_warm", "not_qualified")
-                warm = ("Сегодня ты сделала важное — увидела, куда на самом деле тянет. "
-                        "Не тороплю ни на шаг. Я рядом каждый день в канале, между "
-                        "нашими разговорами — заходи, когда захочется. А захочешь пойти "
-                        "дальше — просто напиши мне, и продолжим оттуда, где остановились.")
-                if not await _ac_speak(bot, chat_id, message, warm, None):
-                    await _ac_say(bot, chat_id, message, warm + "\n\n— Алёна", None)
-                if message is not None:
-                    await _nudge_channel(message, tg_id)
-                return
+        if not is_member and not await _offer_gate_allows(tg_id):
+            await log_event(tg_id, "offer_gated_warm", "not_qualified")
+            if not await _ac_speak(bot, chat_id, message, _GATED_WARM_TEXT, None):
+                await _ac_say(bot, chat_id, message, _GATED_WARM_TEXT + "\n\n— Алёна", None)
+            if message is not None:
+                await _nudge_channel(message, tg_id)
+            return
         if is_member:
             # Член Клуба → мост в 1:1 (текст №8в), без двери Клуба (он уже внутри).
             await log_event(tg_id, "offer_shown", "bridge_1on1")
@@ -2405,6 +2407,15 @@ async def _do_after_close(bot, chat_id: int, tg_id: int, first_name: str | None,
     if is_member:
         await _ac_say(bot, chat_id, message,
                       "На сегодня всё. Ещё разговор — просто /alena.", _menu_kbd())
+        return
+    # Блок 4 гейт и здесь: club_soft несёт цену+кнопку — не квалифицированной не шлём
+    # (дыра, найденная аудитом 10.07: без этого холодная без запроса видела прайс).
+    if not await _offer_gate_allows(tg_id):
+        await log_event(tg_id, "offer_gated_warm", "club_soft_gated")
+        if not await _ac_speak(bot, chat_id, message, _GATED_WARM_TEXT, None):
+            await _ac_say(bot, chat_id, message, _GATED_WARM_TEXT + "\n\n— Алёна", None)
+        if message is not None:
+            await _nudge_channel(message, tg_id)
         return
     await log_event(tg_id, "offer_shown", "club_soft")
     soft = ("Это была твоя бесплатная встреча — больше таких не будет. Захочешь "
