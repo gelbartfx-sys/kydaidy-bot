@@ -1965,13 +1965,25 @@ async def run_stale_session_tick(bot):
                     await bot.send_message(tg_id, _PEAK_HOLD_TEXT, parse_mode=None)
                 await log_event(tg_id, "stale_presence_peak", str(sid))
             else:
-                # Обычная тихая встреча: единственное место, где кнопка Клуба ВО
-                # ВРЕМЯ встречи уместна — оффер ГОЛОСОМ (мандат 03.07), фолбэк текст.
-                if not await send_voice_to(bot, tg_id, _STALE_NUDGE_VOICE,
-                                           _club_only_kbd()):
-                    await bot.send_message(tg_id, _STALE_NUDGE_TEXT,
-                                           reply_markup=_club_only_kbd(), parse_mode=None)
-                await log_event(tg_id, "stale_nudge", str(sid))
+                # Блок 4 гейт: не квалифицирована → НЕ продаём Клуб по таймеру, шлём
+                # присутствие. Fail-open (флаг OFF → всегда True = как раньше).
+                try:
+                    from purchase_stage import stage_allows_offer
+                    _allow = await stage_allows_offer(tg_id)
+                except Exception:
+                    _allow = True
+                if not _allow:
+                    if not await send_voice_to(bot, tg_id, _PEAK_HOLD_VOICE, None):
+                        await bot.send_message(tg_id, _PEAK_HOLD_TEXT, parse_mode=None)
+                    await log_event(tg_id, "stale_presence_gated", str(sid))
+                else:
+                    # Обычная тихая встреча: единственное место, где кнопка Клуба ВО
+                    # ВРЕМЯ встречи уместна — оффер ГОЛОСОМ (мандат 03.07), фолбэк текст.
+                    if not await send_voice_to(bot, tg_id, _STALE_NUDGE_VOICE,
+                                               _club_only_kbd()):
+                        await bot.send_message(tg_id, _STALE_NUDGE_TEXT,
+                                               reply_markup=_club_only_kbd(), parse_mode=None)
+                    await log_event(tg_id, "stale_nudge", str(sid))
             sent += 1
         except Exception:
             logger.warning("stale nudge send failed for %s", tg_id, exc_info=True)
@@ -2309,6 +2321,27 @@ async def _do_after_close(bot, chat_id: int, tg_id: int, first_name: str | None,
     if request:
         q = request.strip().rstrip(".")[:140]
         _name = first_name if re.search(r"[а-яА-ЯёЁ]", first_name or "") else None
+        # Блок 4 ГЕЙТ: не члену, не квалифицированной в тёплую — НЕ показываем цену.
+        # Греем присутствием + каналом, followup-серию НЕ ставим (не давим ценой
+        # холодную). Fail-open: флаг OFF / whitelist / None-стадия → пропускает как
+        # раньше (stage_allows_offer вернёт True). На пике оффер и так не звучит.
+        if not is_member:
+            try:
+                from purchase_stage import stage_allows_offer
+                _allowed = await stage_allows_offer(tg_id)
+            except Exception:
+                _allowed = True  # fail-open
+            if not _allowed:
+                await log_event(tg_id, "offer_gated_warm", "not_qualified")
+                warm = ("Сегодня ты сделала важное — увидела, куда на самом деле тянет. "
+                        "Не тороплю ни на шаг. Я рядом каждый день в канале, между "
+                        "нашими разговорами — заходи, когда захочется. А захочешь пойти "
+                        "дальше — просто напиши мне, и продолжим оттуда, где остановились.")
+                if not await _ac_speak(bot, chat_id, message, warm, None):
+                    await _ac_say(bot, chat_id, message, warm + "\n\n— Алёна", None)
+                if message is not None:
+                    await _nudge_channel(message, tg_id)
+                return
         if is_member:
             # Член Клуба → мост в 1:1 (текст №8в), без двери Клуба (он уже внутри).
             await log_event(tg_id, "offer_shown", "bridge_1on1")
