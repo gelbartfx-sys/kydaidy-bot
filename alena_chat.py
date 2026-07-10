@@ -1269,6 +1269,13 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
                     brain_phase = (new_cm or {}).get("method_phase")
                     brain_medium = (new_cm or {}).get("medium")
                     _peak_now = bool((new_cm or {}).get("peak"))
+                    # Блок 2 контракт: ход give_shift со включённой ступенью 2 несёт
+                    # сравнение путей → метим для гейта квалификации (крэш-сейф, флаг-гейт).
+                    if settings.hunt_stage2_enabled and brain_phase == "give_shift":
+                        try:
+                            await log_event(user.id, "hunt_comparison_shown", "give_shift")
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.warning("brain_v2 turn failed for %s → fallback v1: %s", user.id, e,
                                    exc_info=True)
@@ -2221,6 +2228,66 @@ async def _ac_say(bot, chat_id: int, message, text: str, kbd=None):
         await bot.send_message(chat_id, text, reply_markup=kbd, parse_mode=None)
 
 
+# ── Блок 3 (лестница Ханта, ступень 3 «выбор двери») ──────────────────────────
+# Кай 10.07: дверь решает ТЕМПЕРАТУРА, не архетип. Холодная → всегда Клуб (дешёвый
+# первый шаг, не потолок). 1:1 — только горячей И жёсткой одиночке (в группе ей
+# тесно от чужих правил/глаз). Архетип лишь красит слова. Всё за флагом hunt_stage3.
+_HARD_LONER_CODES = {"R", "Q", "H", "C"}  # Бунтарка/Королева/Охотница/Затворница
+
+
+def _archetype_code(u_row) -> str | None:
+    """Ведущий код Тени из shadow_dist юзера. Крэш-сейф → None."""
+    try:
+        shadow = (u_row or {}).get("shadow_dist")
+        if not shadow:
+            return None
+        counts = decode_distribution(shadow)
+        return winner_from_counts(counts) if counts else None
+    except Exception:
+        return None
+
+
+async def _door_lean_by_temp(tg_id: int, u_row) -> str:
+    """Дверь по температуре (Кай 10.07): 'one_on_one' ТОЛЬКО если стадия hot И
+    архетип — жёсткая одиночка. Иначе 'club'. Крэш-сейф → 'club'."""
+    try:
+        from purchase_stage import get_purchase_stage
+        stage = await get_purchase_stage(tg_id)
+        code = _archetype_code(u_row)
+        if stage == "hot" and code in _HARD_LONER_CODES:
+            return "one_on_one"
+    except Exception:
+        logger.warning("_door_lean_by_temp failed → club", exc_info=True)
+    return "club"
+
+
+def _door_choice_line(door: str, u_row) -> str:
+    """Голосовой микро-шаг «две двери» ПЕРЕД ценой (черновик — финальный тон правит
+    Алёна). Наклон по температуре; архетип красит одной фразой из его тега."""
+    tag = ""
+    try:
+        code = _archetype_code(u_row)
+        if code:
+            tag = (ARCHETYPES.get(code, {}) or {}).get("too", "")
+    except Exception:
+        tag = ""
+    if door == "one_on_one":
+        colour = (f"а ты — та, {tag}, кому в любой группе тесно от чужих правил и глаз"
+                  if tag else "а тебе, по тому, что открылось, тесно среди чужих правил")
+        return (
+            "Дальше — две двери, и скажу честно, к какой тебя тянет. Есть круг — "
+            "женщины рядом, общий ритм, место где не надо держать лицо. "
+            f"{colour} — тебе, кажется, ближе только ты и я, наедине, где никто не "
+            "диктует темп и не надо быть удобной даже мне. Хотя если захочется сперва "
+            "просто побыть среди своих — круг тоже открыт. Сейчас покажу обе, выберешь сама.")
+    return (
+        "Дальше — две двери, и скажу честно, к какой тебя, по-моему, тянет. Есть "
+        "работа только вдвоём, наедине — вся про тебя. А есть круг: рядом такие же, "
+        "общий ритм, место где впервые можно не держать лицо и не быть для всех "
+        "сильной. По тому, что сегодня открылось, тебе, кажется, нужнее сперва второе — "
+        "побыть среди своих, ничего не доказывая. Но выбор твой, сейчас покажу обе.")
+
+
 async def _do_after_close(bot, chat_id: int, tg_id: int, first_name: str | None,
                           request: str | None = None, message=None):
     """Общее ядро оффер-пути после закрытия встречи (Волна 1 + батч Б).
@@ -2232,6 +2299,7 @@ async def _do_after_close(bot, chat_id: int, tg_id: int, first_name: str | None,
     # Сегментация оффера — ТОЛЬКО по реальному членству в Клубе (фикс 02.07:
     # whitelist-тестеры раньше улетали в VIP-ветку и не видели боевой путь).
     is_member = await _is_club_member(tg_id)
+    door = None  # Блок 3: выбранная дверь (club|one_on_one), выставляется ниже за флагом
 
     # Волна 1: закрытие могло прийти БЕЗ маркера [[ЗАПРОС]] → реконструируем запрос
     # из модели клиентки (настоящий → фасад), чтобы кружок-оффер собрался всегда.
@@ -2249,23 +2317,43 @@ async def _do_after_close(bot, chat_id: int, tg_id: int, first_name: str | None,
             card = _MEMBER_OFFER_CARD
             fallback = _MEMBER_KRUZHOK_SCRIPT
         else:
-            # Адаптивный порядок (Кай 02.07): ГОРЯЧЕЙ (T4 / lead_hot_kw) — флагман 1:1;
-            # тянулась глубже (depth_intent) — depth-скрипт; иначе дефолт (текст №2).
             u_row = await get_user(tg_id)
-            hot_kw = (await events_count_recent(tg_id, "lead_hot_kw", 48)) > 0
-            if (u_row or {}).get("lead_track") == "T4" or hot_kw:
-                await log_event(tg_id, "offer_shown",
-                                "flagship_1on1_kw" if hot_kw else "flagship_1on1_T4")
-                script = _flagship_kruzhok_script(q)
-            elif (await events_count_recent(tg_id, "depth_intent", 48)) > 0:
-                await log_event(tg_id, "offer_shown", "depth_1on1")
-                script = _depth_kruzhok_script(q)
+            if settings.hunt_stage3_enabled:
+                # Блок 3: дверь по ТЕМПЕРАТУРЕ. Холодная → Клуб; 1:1 только горячей
+                # жёсткой одиночке. Явный шаг выбора двери прозвучит перед тизером.
+                door = await _door_lean_by_temp(tg_id, u_row)
+                if door == "one_on_one":
+                    await log_event(tg_id, "offer_shown", "flagship_1on1_temp")
+                    script = _flagship_kruzhok_script(q)
+                else:
+                    await log_event(tg_id, "offer_shown", "club_request")
+                    script = _default_kruzhok_script(_name, q)
             else:
-                await log_event(tg_id, "offer_shown", "club_request")
-                script = _default_kruzhok_script(_name, q)
+                # Адаптивный порядок (Кай 02.07): ГОРЯЧЕЙ (T4 / lead_hot_kw) — флагман 1:1;
+                # тянулась глубже (depth_intent) — depth-скрипт; иначе дефолт (текст №2).
+                hot_kw = (await events_count_recent(tg_id, "lead_hot_kw", 48)) > 0
+                if (u_row or {}).get("lead_track") == "T4" or hot_kw:
+                    await log_event(tg_id, "offer_shown",
+                                    "flagship_1on1_kw" if hot_kw else "flagship_1on1_T4")
+                    script = _flagship_kruzhok_script(q)
+                elif (await events_count_recent(tg_id, "depth_intent", 48)) > 0:
+                    await log_event(tg_id, "offer_shown", "depth_1on1")
+                    script = _depth_kruzhok_script(q)
+                else:
+                    await log_event(tg_id, "offer_shown", "club_request")
+                    script = _default_kruzhok_script(_name, q)
             kbd = _offer_kbd()
             card = _OFFER_CARD
             fallback = _OFFER_FALLBACK_TEXT
+        # Блок 3: голосовой шаг «выбор двери» ПЕРЕД тизером/ценой (флаг-гейт, не члену).
+        if door and not is_member:
+            try:
+                _choice = _door_choice_line(door, await get_user(tg_id))
+                if not await _ac_speak(bot, chat_id, message, _choice, None):
+                    await _ac_say(bot, chat_id, message, _choice, None)
+                await log_event(tg_id, "product_choice_shown", door)
+            except Exception:
+                logger.warning("door choice step failed (continuing)", exc_info=True)
         # (а) тизер №1 голосом БЕЗ кнопок (Кай 09.07: оффер только ПОД кружком —
         # кнопки на тизере + на карточке = задвоение). Кнопки идут один раз — с карточкой.
         if not await _ac_speak(bot, chat_id, message, _OFFER_TEASER, None):
