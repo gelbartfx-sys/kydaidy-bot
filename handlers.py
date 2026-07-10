@@ -174,6 +174,12 @@ async def cb_check_sub(cb: CallbackQuery):
             await log_event(cb.from_user.id, "subscribe_confirmed")
         except Exception:
             logger.debug("log_event subscribe_confirmed failed", exc_info=True)
+        # Воронка v2: подписка = микро-обязательство → пересчёт стадии сразу (крэш-сейф).
+        try:
+            from purchase_stage import refresh_purchase_stage
+            await refresh_purchase_stage(cb.from_user.id)
+        except Exception:
+            logger.debug("purchase_stage refresh (sub) failed", exc_info=True)
         await cb.answer("Готово 🤍")
         await cb.message.answer(
             "🤍 Вижу тебя в канале — спасибо, что рядом.\n\n"
@@ -717,6 +723,12 @@ async def show_one_product(callback: CallbackQuery):
         await log_event(user_id, "buy_click", code)
     except Exception:
         logger.debug("log_event buy_click failed", exc_info=True)
+    # Воронка v2: клик покупки = HOT → пересчёт стадии сразу (крэш-сейф).
+    try:
+        from purchase_stage import refresh_purchase_stage
+        await refresh_purchase_stage(user_id)
+    except Exception:
+        logger.debug("purchase_stage refresh (buy) failed", exc_info=True)
 
     # Try DB first, then hardcoded defaults (Render free wipes SQLite on deploy)
     post = await get_tribute_post(code)

@@ -386,6 +386,12 @@ _RUNTIME_MIGRATIONS = (
         status TEXT DEFAULT 'pending',
         matched_at TIMESTAMP
     )""",
+    # ── Воронка v2 (планёрка 10.07): стадия покупательской готовности лида —
+    # ОТДЕЛЬНО от lead_track (тот = бюджет кружков, НЕ путать). cold/warm_entry/
+    # warm_qualified/hot. Гейт продажи читает её (fail-open: NULL → разрешить).
+    # Крэш-сейф ALTER как остальные.
+    "ALTER TABLE users ADD COLUMN purchase_stage TEXT",
+    "ALTER TABLE users ADD COLUMN purchase_stage_at TIMESTAMP",
 )
 
 
@@ -760,6 +766,29 @@ async def set_lead_track(tg_id: int, track: str):
             "UPDATE users SET lead_track = ? WHERE tg_id = ?", (track, tg_id))
     except Exception:
         logger.warning("set_lead_track failed (continuing)", exc_info=True)
+
+
+async def set_purchase_stage(tg_id: int, stage: str):
+    """Записать стадию покупательской готовности (cold/warm_entry/warm_qualified/
+    hot). ОТДЕЛЬНО от lead_track. Крэш-сейф: сбой не должен ронять встречу/тик —
+    гейт fail-open переживёт отсутствие записи."""
+    try:
+        await _exec(
+            "UPDATE users SET purchase_stage = ?, purchase_stage_at = CURRENT_TIMESTAMP "
+            "WHERE tg_id = ?", (stage, tg_id))
+    except Exception:
+        logger.warning("set_purchase_stage failed (continuing)", exc_info=True)
+
+
+async def get_purchase_stage(tg_id: int) -> str | None:
+    """Текущая стадия | None (не посчитана / ошибка / нет колонки). Крэш-сейф."""
+    try:
+        row = await _exec(
+            "SELECT purchase_stage FROM users WHERE tg_id = ?", (tg_id,), fetch="one")
+        return (row or {}).get("purchase_stage")
+    except Exception:
+        logger.warning("get_purchase_stage failed (continuing)", exc_info=True)
+        return None
 
 
 async def set_user_source(tg_id: int, source: str | None):

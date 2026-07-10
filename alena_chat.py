@@ -1397,6 +1397,14 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
             track = classify(signals)
         if track:
             await set_lead_track(user.id, track)
+        # Воронка v2: пересчёт стадии покупательской готовности (крэш-сейф, только
+        # пишет — гейт fail-open за флагом). Сигналы уже свежие (client_model выше,
+        # lead_signals/track здесь).
+        try:
+            from purchase_stage import refresh_purchase_stage
+            await refresh_purchase_stage(user.id)
+        except Exception:
+            logger.warning("purchase_stage refresh failed (continuing)", exc_info=True)
         if dossier_new:
             await save_dossier(user.id, dossier_new)
         # Пустой reply после вырезания маркеров (модель вернула почти одну служебку) →
