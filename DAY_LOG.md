@@ -31,3 +31,17 @@
 3. Включать флаги ПО ОДНОМУ в Render env + бой D1 после каждого:
    `PURCHASE_STAGE_GATE_ENABLED` → `HUNT_STAGE2_ENABLED` → `HUNT_STAGE3_ENABLED`
    → `COMPARISON_STEP_REQUIRED` (последним, когда stage2 в проде).
+
+### 🟢 S8 шаг 1 ВКЛЮЧЁН (10.07, с сервера kai-tokyo, Кай дал ход «делаем по плану»)
+- `PURCHASE_STAGE_GATE_ENABLED=true` выставлен через Render API, деплой
+  `dep-d98b8jmtrd3s73ec3aeg` live на коммите `b728197`.
+- Бой (пассивный): `/health` = `ok b728197`; логи чистые (TelegramConflictError
+  только 20-60с окна деплоя — известный артефакт polling); D1: колонки
+  `users.purchase_stage/_at` на месте, значения пустые (пишутся после первого
+  хода — трафика после включения не было).
+- Fail-open подтверждён перечиткой `purchase_stage.py:103-129`: флаг ON, но
+  stage=None → allow + событие `gate_unknown_stage_allowed`. Whitelist Кай
+  (6271776494, tg_admin_id) + Алёна (680319075).
+- ⏭ Флаги 2-4 НЕ включаю: `HUNT_STAGE2/3` заблокированы п.2 (тексты ступеней
+  ждут тон-гейт + ✅ Алёны), плюс нужен активный бой D1 — ход Кая в боте, чтобы
+  увидеть запись стадии и событие гейта.
