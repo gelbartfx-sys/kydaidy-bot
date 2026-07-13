@@ -67,3 +67,16 @@
   каждого), шаблоны двери ступени 3, гейт-warm, peak-hold. Commit 9b6a40f, live.
 - peak-hold и гейт-warm УЖЕ боевые (Фаза I + гейт вкл). Ступени 2-3 — за флагами.
 - Черновик v2: docs/funnel-texts-draft-2026-07-10.md → ждёт глаз Алёны → флаги.
+
+## 2026-07-13 — S8 шаги 2-3: ступени Ханта ВКЛЮЧЕНЫ (Кай: «включай»)
+- `HUNT_STAGE2_ENABLED=true` + `HUNT_STAGE3_ENABLED=true` через Render API,
+  деплой dep-d9a79vvaqgkc7397a2vg live, /health = ok df98120.
+- Env сверен: PURCHASE_STAGE_GATE + HUNT_STAGE2 + HUNT_STAGE3 = true,
+  CLUB_DEMO_FILE_ID задан. COMPARISON_STEP_REQUIRED — НЕ включён (по ТЗ последним,
+  после боя stage2: нужно увидеть hunt_comparison_shown в D1 на реальной встрече).
+- Теперь живая воронка: give_shift несёт нейро-сравнение путей → выбор двери по
+  температуре (холодная→Клуб, 1:1 только hot+одиночка) → цена. Гейт греет
+  неквалифицированных без цены.
+- ⏭ Бой: нужна реальная встреча (Кай /alena или юзер) → проверить D1:
+  purchase_stage записан, hunt_comparison_shown, product_choice_shown, порядок
+  событий, оффер выстрелил ≤ TURN_CAP. После боя → COMPARISON_STEP_REQUIRED=true.
