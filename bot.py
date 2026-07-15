@@ -212,6 +212,16 @@ async def main():
     # интервального тика). Редеплой рвёт ход и рестартит планировщик — до 5 мин
     # тишины; разовый create_task чинит подвисшие встречи мгновенно после подъёма.
     asyncio.create_task(run_orphan_turn_tick(bot))
+    # Страховка сна на Render free (диагноз 15.07): web-сервис на free-плане
+    # засыпает после ~15 мин без ВХОДЯЩЕГО HTTP → APScheduler замирает ровно в окна
+    # молчания, которые ловят stale/dead-тики (у затихшей встречи nudged_at так и
+    # остаётся NULL, dead-тик её не берёт — потерянный лид). Реальный фикс — внешний
+    # keep-alive пинг на /health каждые 10–14 мин (UptimeRobot/cron-job.org) или уход
+    # с free-плана. Здесь — подстраховка: как только инстанс проснулся (любой апдейт/
+    # деплой/пинг), сразу подметаем просроченные затихшие и мёртвые встречи, не ожидая
+    # интервального тика. Тики крэш-сейф внутри; no-op, если таких встреч нет.
+    asyncio.create_task(run_stale_session_tick(bot))
+    asyncio.create_task(run_dead_session_tick(bot))
 
     # Webhook server (для Tally + Tribute)
     app = web.Application()

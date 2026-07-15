@@ -39,6 +39,15 @@ from alena_persona import (
 PHASE_STREAK_LIMIT = 2
 _STREAK_BREAK_PHASES = ("surface_facade", "catch_contradiction")
 
+# Держим напряжение перед резолюцией (дефект «мозг рано идёт в give_shift», разбор
+# встречи Кая session 34): give_shift/native_offer не раньше, чем истинный запрос
+# выдержан GIVE_SHIFT_MIN_HOLD ходов на name_true_request, и НИКОГДА на свежем пике.
+# Согласовано с PHASE_STREAK_BREAK: то — анти-залипание на facade/contradiction
+# (толкает ВПЕРЁД к называнию запроса), это — анти-спешка в резолюцию (держит на
+# name_true_request). Фазы не пересекаются, правила не конфликтуют.
+GIVE_SHIFT_MIN_HOLD = 2
+_RESOLUTION_PHASES = ("give_shift", "native_offer")
+
 logger = logging.getLogger(__name__)
 
 # Сколько последних реплик отдаём диагнозу (компактный вход → дёшево на Opus).
@@ -164,6 +173,36 @@ def _bump_streak(cm: dict, new_phase: str | None) -> int:
     return streak
 
 
+def _hold_before_shift(cm: dict, new_phase: str | None, peak: bool,
+                       bypass: bool = False) -> str | None:
+    """Держим напряжение: не пускаем в give_shift/native_offer, пока истинный запрос
+    не выдержан ≥GIVE_SHIFT_MIN_HOLD ходов на name_true_request, и никогда — на
+    свежем пике. Свежую боль держим в присутствии (name_true_request), а не гладим
+    к принятию (разбор встречи Кая: give_shift на 5-м ходу = преждевременное
+    «сворачивание»).
+
+    Читает/пишет счётчик cm['request_hold'] (ходов удержания на name_true_request по
+    ЭФФЕКТИВНОЙ фазе). bypass=True (последний/предпоследний ход, closing_hint) —
+    даём встрече свернуться и не держим бесконечно перед TURN_CAP. Возвращает
+    ЭФФЕКТИВНУЮ фазу. Чистая, тестируемая (без сети)."""
+    prev = cm.get("request_hold")
+    held = prev if isinstance(prev, int) and not isinstance(prev, bool) else 0
+    phase = new_phase
+    if not bypass and phase in _RESOLUTION_PHASES and (peak or held < GIVE_SHIFT_MIN_HOLD):
+        # рано резолвить — держим на назывании запроса, пик держим в присутствии
+        phase = "name_true_request"
+    # Счётчик по ЭФФЕКТИВНОЙ фазе: копим на name_true_request, храним на резолюции,
+    # сбрасываем на более ранних фазах (напряжение ещё не собрано).
+    if phase == "name_true_request":
+        held += 1
+    elif phase in _RESOLUTION_PHASES:
+        pass
+    else:
+        held = 0
+    cm["request_hold"] = held
+    return phase
+
+
 def _merge_moves(cm: dict, new_moves) -> list:
     """Копит маркеры сыгранных приёмов в cm['used_moves'] (анти-дубль между встречами).
 
@@ -284,6 +323,13 @@ async def brain_turn(history: list[dict], name, archetype,
     # залипание, task 1) и достать приёмы прошлых встреч (анти-дубль, task 4).
     cm = dict(client_model) if isinstance(client_model, dict) else {}
     new_phase = dx.get("method_phase")
+    # Держим напряжение: если диагноз рвётся в резолюцию (give_shift/native_offer) до
+    # того, как истинный запрос назван и выдержан, ИЛИ на свежем пике — откатываем к
+    # присутствию/называнию (task 1: «мозг рано идёт в give_shift»). Возле TURN_CAP
+    # (closing_hint) не держим — даём встрече свернуться. Делаем ДО _bump_streak,
+    # чтобы залипание считалось по реально сыгранной фазе.
+    new_phase = _hold_before_shift(cm, new_phase, peak=bool(dx.get("peak")),
+                                   bypass=closing_hint)
     # Счётчик залипания: по ПРЕЖНЕЙ сохранённой фазе (до перезаписи новой ниже).
     streak = _bump_streak(cm, new_phase)
     # Приёмы прошлых встреч (до слияния текущего хода) — голос их не повторяет.

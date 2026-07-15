@@ -19,6 +19,7 @@ from alena_persona import (
 from alena_brain import (
     _default_diagnosis, score_to_signals, _build_diagnosis,
     _bump_streak, _merge_moves, PHASE_STREAK_LIMIT, _STREAK_BREAK_PHASES,
+    _hold_before_shift, GIVE_SHIFT_MIN_HOLD,
 )
 from lead_policy import classify
 import brain_cascade
@@ -293,6 +294,32 @@ def test_streak_break_directive_carries_shift():
     assert "СТОП-ЗАЛИПАНИЕ" not in d2
 
 
+def test_hold_before_shift_holds_tension():
+    """Держим напряжение: give_shift/native_offer не раньше выдержки на
+    name_true_request и НИКОГДА на свежем пике; closing_hint (bypass) отпускает
+    к резолюции у TURN_CAP (task 1: «мозг рано идёт в give_shift»)."""
+    # первое вскрытие: диагноз рвётся в give_shift, держим на назывании
+    cm = {}
+    assert _hold_before_shift(cm, "give_shift", peak=False) == "name_true_request"
+    assert cm["request_hold"] == 1
+    # ещё ход на назывании — набираем выдержку
+    assert _hold_before_shift(cm, "give_shift", peak=False) == "name_true_request"
+    assert cm["request_hold"] == GIVE_SHIFT_MIN_HOLD
+    # выдержано → сдвиг разрешён
+    assert _hold_before_shift(cm, "give_shift", peak=False) == "give_shift"
+    # свежий пик НИКОГДА не резолвим, даже если выдержано
+    assert _hold_before_shift({"request_hold": 5}, "give_shift", peak=True) \
+        == "name_true_request"
+    # native_offer держим так же
+    assert _hold_before_shift({}, "native_offer", peak=False) == "name_true_request"
+    # bypass (closing_hint у TURN_CAP) — даём встрече свернуться
+    assert _hold_before_shift({}, "give_shift", peak=False, bypass=True) == "give_shift"
+    # откат на раннюю фазу сбрасывает счётчик (напряжение ещё не собрано)
+    cm2 = {"request_hold": 2}
+    assert _hold_before_shift(cm2, "surface_facade", peak=False) == "surface_facade"
+    assert cm2["request_hold"] == 0
+
+
 def test_build_response_prompt_peak_injects_protocol():
     """peak=True инъектирует протокол пика с запретом копающего вопроса-в-бездну."""
     plain = build_response_prompt("Аня", None, "веди", "catch_contradiction", peak=False)
@@ -351,6 +378,7 @@ if __name__ == "__main__":
     test_diagnosis_peak_moves_parse()
     test_bump_streak_increment_and_reset()
     test_streak_break_directive_carries_shift()
+    test_hold_before_shift_holds_tension()
     test_build_response_prompt_peak_injects_protocol()
     test_build_response_prompt_used_moves_antidubl()
     test_merge_moves_accumulate_dedup()

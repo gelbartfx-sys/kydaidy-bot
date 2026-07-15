@@ -81,6 +81,11 @@ TURN_CAP = 10              # предохранитель: после столь
                            # продающий момент). 7→10, чтобы встреча доходила до продажи.
                            # (истор.: 20→12 03.07, 12→7 05.07 — оба перелёт в другую сторону)
 HISTORY_LIMIT = 40         # сколько сообщений истории отдаём модели
+# Порог «клиентка на пике готовности» → показываем оффер, НЕ дожидаясь TURN_CAP
+# (дефект «оффер повис»: readiness растёт, но закрытие висело только на маркере/
+# TURN_CAP/native_offer). Консервативно 0.7, и только когда сдвиг УЖЕ дан
+# (give_shift/native_offer) и НЕ на пике боли — чтобы не продать вместо присутствия.
+OFFER_READINESS_CLOSE = 0.7
 ONE_ON_ONE_URL = "https://t.me/tribute/app?startapp=sZXq"  # 1:1 подписка (1 встреча/мес, entry); 3 встречи = sZXr
 CLUB_URL = "https://t.me/tribute/app?startapp=sULY"
 
@@ -423,6 +428,18 @@ async def open_shadow_session(target: Message, user, code: str,
                 # клиентка теряла нить. Алёна ВЕДЁТ, а не отдаёт инициативу: вопрос
                 # Тени — в историю сессии + перед глазами + подсказки первого шага.
                 q = _SHADOW_HOOK_Q.get(code, "Что у тебя сейчас болит на самом деле?")
+                # ДЕДУП (баг Кая session 34: вопрос ушёл ДВАЖДЫ, 2 записи model).
+                # open_shadow_session вызвана повторно на только что открытой встрече
+                # (двойной апдейт/ретрай) → эта ветка второй раз сеяла и слала ТОТ ЖЕ
+                # вопрос. Если он уже последней model-репликой в истории — no-op.
+                try:
+                    _recent = await ai_get_messages(sess["id"], 4)
+                except Exception:
+                    _recent = []
+                if any(m.get("role") == "model"
+                       and (m.get("content") or "").strip() == f"«{q}»"
+                       for m in (_recent or [])):
+                    return True   # вопрос уже задан — не дублируем
                 try:
                     await ai_add_message(sess["id"], user.id, "model", f"«{q}»")
                 except Exception:
@@ -1269,6 +1286,7 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
         brain_phase = None        # фаза метода из диагноза → триггер закрытия на native_offer
         brain_medium = None       # H1: "voice" на эмоц. пике/сдвиге → ответ голосовым
         _peak_now = False         # пик боли из диагноза → дошив-микрошаг вместо вопроса
+        _brain_readiness = 0.0    # offer_readiness из диагноза → ранний оффер (task 2)
         try:
             if settings.brain_v2_enabled:
                 try:
@@ -1305,6 +1323,12 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
                     brain_phase = (new_cm or {}).get("method_phase")
                     brain_medium = (new_cm or {}).get("medium")
                     _peak_now = bool((new_cm or {}).get("peak"))
+                    # Готовность к офферу из структурного диагноза (0..1) — для
+                    # раннего закрытия с оффером на пике готовности (task 2).
+                    try:
+                        _brain_readiness = float((new_cm or {}).get("offer_readiness"))
+                    except (TypeError, ValueError):
+                        _brain_readiness = 0.0
                     # Блок 2 контракт: ход give_shift со включённой ступенью 2 несёт
                     # сравнение путей → метим для гейта квалификации (крэш-сейф, флаг-гейт).
                     if settings.hunt_stage2_enabled and brain_phase == "give_shift":
@@ -1406,9 +1430,17 @@ async def _talk(message: Message, text: str, by_voice: bool = False,
             r"|согласна|можно|нужно|ок(ей)?|начн[её]м|вперёд|вперед)\b",
             (text or "").strip(), re.I))
         _bridge_yes = _bridge_invite and _user_affirm
+        # 🔴 Пик готовности к офферу (task 2, дефект «оффер повис»): сдвиг уже дан
+        # (give_shift/native_offer) И структурная готовность высокая (≥порог) И это
+        # НЕ пик боли (на пике не продаём — проживаем). Тогда показываем оффер, не
+        # дожидаясь TURN_CAP/маркера — иначе лид уходит после вскрытия, оффера нет.
+        _offer_ready_close = (
+            not _peak_now
+            and brain_phase in ("give_shift", "native_offer")
+            and _brain_readiness >= OFFER_READINESS_CLOSE)
         closed = (CLOSE_MARK in reply) or force_close \
             or (brain_phase == "native_offer") or _closing_phrase or _user_ready \
-            or _bridge_yes
+            or _bridge_yes or _offer_ready_close
         reply = reply.replace(CLOSE_MARK, "").strip()
         reply, request = extract_request(reply)
         reply, dossier_new = extract_dossier(reply)
