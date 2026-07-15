@@ -239,6 +239,15 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _onramp_keyboard() -> InlineKeyboardMarkup:
+    # Вход с ролика «за встречей»: ОДНА кнопка = обязательный путь (тест на сайте),
+    # без развилок. Тёплое меню (_main_menu_keyboard) — для возвращающихся.
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌑 Пройти зеркало → к встрече",
+                              url="https://kydaidy.com/shadow")],
+    ])
+
+
 # ── Навигация: «← Назад» / «🏠 Меню» (единый стиль на всех экранах) ───────────
 # callback "menu" ловит handlers.router (подключён последним) → срабатывает из
 # любого экрана/роутера (alena, guide). "← Назад" ведёт на родительский callback.
@@ -300,7 +309,7 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         await upsert_user(user.id, user.username, user.first_name)
         if seller and seller.replace("_", "").replace("-", "").isalnum():
             await set_user_ref_seller(user.id, seller)
-        await message.answer(WELCOME_NO_POVOROT, reply_markup=_main_menu_keyboard())
+        await message.answer(WELCOME_NO_POVOROT, reply_markup=_onramp_keyboard())
         return
 
     args, source = _split_source(args)
@@ -337,7 +346,7 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
     if povorot:
         await _send_povorot_result(message, povorot)
     else:
-        await message.answer(WELCOME_NO_POVOROT, reply_markup=_main_menu_keyboard())
+        await message.answer(WELCOME_NO_POVOROT, reply_markup=_onramp_keyboard())
 
 
 async def _prompt_shadow_photo(message: Message, dist: str):
@@ -615,7 +624,7 @@ async def cmd_start(message: Message):
             reply_markup=_main_menu_keyboard(),
         )
     else:
-        await message.answer(WELCOME_NO_POVOROT, reply_markup=_main_menu_keyboard())
+        await message.answer(WELCOME_NO_POVOROT, reply_markup=_onramp_keyboard())
 
 
 async def _send_povorot_result(message: Message, povorot: int):
@@ -839,11 +848,9 @@ async def show_quiz(event):
     except Exception:
         logger.debug("log_event quiz_open failed", exc_info=True)
     await target.answer(
-        "«Какая Тень в тебе активна» — тест из 10 тёмных женских архетипов. "
-        "10 вопросов, 5 минут.\n\n"
-        "Пройди здесь: https://kydaidy.com/shadow\n\n"
-        "В конце пришли мне сюда своё фото — соберу твой архетипический профиль.",
-        reply_markup=_menu_only_kbd(),
+        "«Какая Тень в тебе активна» — тест из 10 тёмных женских архетипов, минут пять.\n\n"
+        "В конце пришли мне сюда своё фото — соберу твой профиль, и продолжим на встрече.",
+        reply_markup=_onramp_keyboard(),
     )
     if isinstance(event, CallbackQuery):
         await event.answer()
