@@ -44,29 +44,41 @@ BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 async def _gen_image_payload(payload: dict, api_key: str | None, what: str) -> bytes:
     """Шлёт payload на image-модель с фолбэком по списку моделей. Возвращает image bytes."""
+    import asyncio as _asyncio
     import aiohttp as _aiohttp
     last_err = ""
     key = api_key or _ENV_KEY
+    # Ретрай на КАЖДОЙ модели (Gemini даёт транзиентные 5xx/таймауты/пустой ответ —
+    # portrait_fail 15.07 был именно транзиентом: та же генерация через минуту работала).
+    # 2 попытки × пауза перед сдвигом на фолбэк-модель.
     for model in IMAGE_MODEL_FALLBACKS:
         url = f"{BASE}/models/{model}:generateContent?key={key}"
-        try:
-            async with _aiohttp.ClientSession() as s:
-                async with s.post(url, json=payload,
-                                  timeout=_aiohttp.ClientTimeout(total=120)) as r:
-                    body = await r.json()
-        except Exception as e:                      # сетевой сбой — пробуем след. модель
-            last_err = f"{model}: {e}"; continue
-        if "candidates" not in body:
-            last_err = f"{model}: {json.dumps(body)[:200]}"
-            logger.warning("image gen model %s failed: %s", model, last_err)
-            continue
-        for p in body["candidates"][0].get("content", {}).get("parts", []):
-            inline = p.get("inlineData") or p.get("inline_data")
-            if inline and str(inline.get("mimeType") or inline.get("mime_type", "")).startswith("image/"):
-                if model != IMAGE_MODEL_FALLBACKS[0]:
-                    logger.info("image gen: сработала фолбэк-модель %s", model)
-                return base64.b64decode(inline["data"])
-        last_err = f"{model}: no image in response"
+        for attempt in range(2):
+            try:
+                async with _aiohttp.ClientSession() as s:
+                    async with s.post(url, json=payload,
+                                      timeout=_aiohttp.ClientTimeout(total=120)) as r:
+                        body = await r.json()
+            except Exception as e:                  # сетевой сбой/таймаут — ретрай, потом след. модель
+                last_err = f"{model} try{attempt+1}: {e}"
+                if attempt == 0:
+                    await _asyncio.sleep(2.0); continue
+                break
+            if "candidates" not in body:
+                last_err = f"{model} try{attempt+1}: {json.dumps(body)[:200]}"
+                logger.warning("image gen model %s failed: %s", model, last_err)
+                if attempt == 0:
+                    await _asyncio.sleep(2.0); continue
+                break
+            for p in body["candidates"][0].get("content", {}).get("parts", []):
+                inline = p.get("inlineData") or p.get("inline_data")
+                if inline and str(inline.get("mimeType") or inline.get("mime_type", "")).startswith("image/"):
+                    if model != IMAGE_MODEL_FALLBACKS[0]:
+                        logger.info("image gen: сработала фолбэк-модель %s", model)
+                    return base64.b64decode(inline["data"])
+            last_err = f"{model} try{attempt+1}: no image in response"
+            if attempt == 0:
+                await _asyncio.sleep(2.0); continue
     raise RuntimeError(f"{what} failed on all models: {last_err}")
 
 # --- Жёсткий tone-of-voice блок (из docs/positioning.md) ---
