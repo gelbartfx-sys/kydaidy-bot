@@ -12,7 +12,7 @@ from aiogram import Router, F
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.types import (
     Message, FSInputFile, BufferedInputFile,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo,
 )
 
 from config import settings
@@ -240,11 +240,12 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def _onramp_keyboard() -> InlineKeyboardMarkup:
-    # Вход с ролика «за встречей»: ОДНА кнопка = обязательный путь (тест на сайте),
-    # без развилок. Тёплое меню (_main_menu_keyboard) — для возвращающихся.
+    # Вход с ролика «за встречей»: ОДНА кнопка = обязательный путь. Тест открывается
+    # как Telegram Mini App (web_app) — внутри ТГ, без выхода в браузер. В финале
+    # Mini App возвращает в чат по deeplink s_<dist> → путь А (портрет→кружок→встреча).
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌑 Пройти зеркало → к встрече",
-                              url="https://kydaidy.com/shadow")],
+                              web_app=WebAppInfo(url="https://kydaidy.com/app"))],
     ])
 
 
