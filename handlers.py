@@ -227,14 +227,15 @@ def _nurture_optin_keyboard() -> InlineKeyboardMarkup:
 
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
-    # Тест-первым (мандат Кая 05.07): «Узнать свою Тень» = входной лид-магнит,
-    # первой кнопкой; синхронно с текстом WELCOME_NO_POVOROT (он уже тест-первый).
+    # Упрощено (мандат Кая 13.07): две кнопки вместо четырёх. «Узнать свою Тень»
+    # убрана — после прохождения теста она бессмысленна, а кто не проходил, идёт
+    # через on-ramp (см. WELCOME_NO_POVOROT/_onramp_keyboard); «Мой кабинет» тоже
+    # убрана. Обе остаются доступны командами /quiz и /cabinet (хендлеры show_quiz/
+    # show_cabinet живы — их callback'и quiz/cabinet тоже, просто не в этом меню).
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🌑 Узнать свою Тень", callback_data="quiz")],
             [InlineKeyboardButton(text="💬 Алёна на связи", callback_data="alena")],
             [InlineKeyboardButton(text="🛍️ Что доступно", callback_data="products")],
-            [InlineKeyboardButton(text="👤 Мой кабинет", callback_data="cabinet")],
         ]
     )
 

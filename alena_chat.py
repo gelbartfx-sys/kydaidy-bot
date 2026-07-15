@@ -721,6 +721,31 @@ async def _meeting_gate(user) -> str:
     return "ok"
 
 
+# Подписка-гейт (мандат Кая 13.07): подписка на канал становится ОБЯЗАТЕЛЬНЫМ
+# условием встречи (раньше — мягкий нудж, встречу не блокировал). Проверяется
+# в _do_start ПОСЛЕ need_shadow/лимита, ДО открытия сессии (списания встречи).
+# Whitelist — мимо стены (см. вызов в _do_start: if not _is_unlimited(...)).
+# _is_subscribed/_CHANNEL_URL — из handlers, локальный (lazy) импорт по месту
+# использования, тем же приёмом, что и существующий _nudge_channel в этом файле
+# (handlers.py не импортирует alena_chat на верхнем уровне — реального цикла
+# нет, но держим стиль модуля единообразным).
+_SUB_WALL_TEXT = (
+    "Встреча бесплатная. Одно условие — будь в моём канале: там я живу между "
+    "встречами.\n\nПодпишись и возвращайся — открою.")
+
+
+def _sub_wall_kbd() -> InlineKeyboardMarkup:
+    from handlers import _CHANNEL_URL
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🕯 Подписаться на канал", url=_CHANNEL_URL)],
+        [InlineKeyboardButton(text="✅ Я подписалась — начать", callback_data="alena:start")],
+    ])
+
+
+async def _send_sub_wall(target: Message):
+    await target.answer(_SUB_WALL_TEXT, reply_markup=_sub_wall_kbd(), parse_mode=None)
+
+
 async def _send_need_shadow(target: Message):
     await target.answer(_NEED_SHADOW_TEXT + "\n\n— Алёна",
                         reply_markup=_need_shadow_kbd(), parse_mode=None)
@@ -794,6 +819,17 @@ async def _do_start(callback: CallbackQuery):
             await _send_exhausted(callback.message)
             await callback.answer()
             return
+        # ПРАВКА (мандат Кая 13.07): подписка на канал — обязательное условие
+        # встречи. Whitelist — мимо стены (свои/тестовые и так безлимит).
+        # sub=False (точно не подписан) → стена, встречу не открываем.
+        # sub=None (бот не админ канала / сбой getChatMember) — крэш-сейф:
+        # пропускаем, не отсекаем реального человека из-за технического сбоя.
+        if not _is_unlimited(user):
+            from handlers import _is_subscribed
+            if await _is_subscribed(callback.bot, user.id) is False:
+                await _send_sub_wall(callback.message)
+                await callback.answer()
+                return
         await ai_open_session(user.id)  # списание встречи — при старте
         await log_event(user.id, "session_open", "manual")
         # Вопрос Алёны — в историю (контекст первого хода для мозга, как в авто-пути).
