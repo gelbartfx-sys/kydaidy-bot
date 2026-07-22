@@ -182,6 +182,14 @@ CREATE TABLE IF NOT EXISTS bank_ledger (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(couple_id, kind, day_key)
 );
+
+CREATE TABLE IF NOT EXISTS sixsec (
+    tg_id INTEGER PRIMARY KEY,
+    weak TEXT,
+    day INTEGER DEFAULT 0,
+    last_sent_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -449,6 +457,16 @@ _RUNTIME_MIGRATIONS = (
         day_key TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(couple_id, kind, day_key)
+    )""",
+    # ── «6 секунд» (Шаг 2, on-ramp): лёгкий стейт 3 вечеров по образцу
+    # atm_nextday. day = последний отправленный вечер (0..3), last_sent_at —
+    # время отправки (метка ДО отправки = антидубль); тик advance-ит по времени.
+    """CREATE TABLE IF NOT EXISTS sixsec (
+        tg_id INTEGER PRIMARY KEY,
+        weak TEXT,
+        day INTEGER DEFAULT 0,
+        last_sent_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""",
 )
 
@@ -1895,3 +1913,52 @@ async def render_bank_card(couple_id: int) -> str:
         f"{bar}  к цели 5:1\n"
         f"Поворотов-к: {b['turns']}"
     )
+
+
+# ── «6 секунд»: 3 вечера микро-действий под слабую опору (Шаг 2, on-ramp) ─────
+# Свой лёгкий стейт по образцу atm_nextday: day = последний отправленный вечер
+# (0..3), last_sent_at — время отправки (метка ДО отправки, антидубль). Тик
+# advance-ит вечер по времени (~20 ч), как run_atm_nextday_tick. Всё крэш-сейф.
+
+async def sixsec_begin(tg_id: int, weak: str):
+    """Старт «6 секунд»: вечер 1 шлётся сразу (day=1, метка now). upsert (retake ок)."""
+    try:
+        await _exec(
+            "INSERT INTO sixsec (tg_id, weak, day, last_sent_at) "
+            "VALUES (?, ?, 1, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(tg_id) DO UPDATE SET weak = excluded.weak, day = 1, "
+            "last_sent_at = CURRENT_TIMESTAMP",
+            (tg_id, weak))
+    except Exception:
+        logger.warning("sixsec_begin failed (continuing)", exc_info=True)
+
+
+async def sixsec_get(tg_id: int):
+    """Строка стейта «6 секунд» → dict | None. Крэш-сейф."""
+    try:
+        return await _exec("SELECT * FROM sixsec WHERE tg_id = ?", (tg_id,), fetch="one")
+    except Exception:
+        logger.warning("sixsec_get failed (continuing)", exc_info=True)
+        return None
+
+
+async def sixsec_due(hours: int = 20, limit: int = 50):
+    """Кому пора следующий вечер: day 1..2, прошло ≥N часов с прошлого. Крэш-сейф → []."""
+    try:
+        return await _exec(
+            "SELECT tg_id, weak, day FROM sixsec WHERE day BETWEEN 1 AND 2 "
+            f"AND datetime(last_sent_at, '+{int(hours)} hours') < datetime('now') "
+            f"LIMIT {int(limit)}", fetch="all") or []
+    except Exception:
+        logger.warning("sixsec_due failed (continuing)", exc_info=True)
+        return []
+
+
+async def sixsec_advance(tg_id: int, day: int):
+    """Отметить отправку вечера `day` (ДО отправки — антидубль). Крэш-сейф."""
+    try:
+        await _exec(
+            "UPDATE sixsec SET day = ?, last_sent_at = CURRENT_TIMESTAMP WHERE tg_id = ?",
+            (int(day), tg_id))
+    except Exception:
+        logger.warning("sixsec_advance failed (continuing)", exc_info=True)

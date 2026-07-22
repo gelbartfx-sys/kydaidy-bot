@@ -32,7 +32,7 @@ from database import (
 )
 from quiz_atmosfera_data import (
     QUESTIONS, OPORA_NAMES, RESULTS_WEAK, RESULTS_STRONG, META_TEXT, TONIGHT,
-    NEXTDAY_QUESTION, NEXTDAY_YES, NEXTDAY_NO, INVITE_OFFER, INVITE_FORWARD,
+    NEXTDAY_QUESTION, NEXTDAY_YES, NEXTDAY_NO, INVITE_FORWARD,
     PAIR_INTRO, PAIR_ROW, PAIR_GAP_ACCENT, PAIR_TONIGHT, SCALE_LABELS,
 )
 
@@ -177,13 +177,16 @@ async def _finish(msg: Message, tg_id: int, st: dict):
 
     if st.get("pair_src"):
         await _send_pair_card(msg.bot, st["pair_src"], tg_id, scores)
-    else:
-        await msg.answer(
-            INVITE_OFFER, parse_mode=None,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Пригласить партнёра",
-                                      callback_data="atmq:invite")],
-            ]))
+
+    # On-ramp в «6 секунд» (Шаг 2): единый вход — сразу под слабую опору, с первым
+    # числом банка. Приглашение партнёра теперь в конце 3 вечеров (INVITE_OFFER
+    # больше не шлём здесь — иначе дубль CTA). Ленивый импорт: избегаем цикла
+    # (sixsec_data → quiz_atmosfera не тянет). Крэш-сейф: сбой не рушит результат.
+    try:
+        from sixsec import send_sixsec_onramp
+        await send_sixsec_onramp(msg, tg_id, weak)
+    except Exception:
+        logger.warning("sixsec onramp failed (continuing)", exc_info=True)
 
 
 def _pair_card_text(mine: dict, theirs: dict, gap_o: str) -> str:
