@@ -166,6 +166,22 @@ CREATE TABLE IF NOT EXISTS atm_quiz (
     nextday_sent INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS couples (
+    couple_id INTEGER PRIMARY KEY,
+    partner_id INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS bank_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    couple_id INTEGER,
+    kind TEXT,
+    sign INTEGER,
+    day_key TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(couple_id, kind, day_key)
+);
 """
 
 
@@ -414,6 +430,25 @@ _RUNTIME_MIGRATIONS = (
         pair_src INTEGER,
         nextday_sent INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    # ── Сквозной Банк 5:1 (Шаг 1, спина кольца): цифра принадлежит ПАРЕ ────────
+    # couples: couple_id = pair_src инициатора (для соло = собственный tg_id),
+    # partner_id заполняется при образовании пары. bank_ledger: журнал поворотов,
+    # UNIQUE(couple_id,kind,day_key) даёт идемпотентность bank_add. Крэш-сейф
+    # докатка как остальные — упавшая миграция деградирует фичу, не роняет бота.
+    """CREATE TABLE IF NOT EXISTS couples (
+        couple_id INTEGER PRIMARY KEY,
+        partner_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS bank_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        couple_id INTEGER,
+        kind TEXT,
+        sign INTEGER,
+        day_key TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(couple_id, kind, day_key)
     )""",
 )
 
@@ -1709,3 +1744,154 @@ async def atm_mark_nextday(tg_id: int):
                     (tg_id,))
     except Exception:
         logger.warning("atm_mark_nextday failed (continuing)", exc_info=True)
+
+
+# ── Сквозной Банк 5:1 (Шаг 1, спина кольца) ──────────────────────────────────
+# Одна цифра-соотношение на ПАРУ (не на users): «повороты-к» / «повороты-от».
+# couple_id резолвится из atm_quiz.pair_src; счётчик не кэшируем — SUM на чтение.
+# Всё крэш-сейф по стилю atm_*: сбой деградирует фичу банка, не роняет поток.
+
+def _bank_day_key(day_key: str | None) -> str:
+    """day_key по умолчанию = сегодняшняя дата UTC (YYYY-MM-DD) — ключ идемпотентности."""
+    return day_key or datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def _bank_ratio_str(plus: int, minus: int) -> str:
+    """Соотношение «к:от» несократимой дробью: 4,1 → '4:1'; 8,2 → '4:1'.
+    minus=0 → 'N:0' (пара ещё без холодных моментов; деления на ноль нет)."""
+    if minus <= 0:
+        return f"{plus}:0"
+    from math import gcd
+    g = gcd(plus, minus) or 1
+    return f"{plus // g}:{minus // g}"
+
+
+def _bank_progress_to_5(plus: int, minus: int) -> float:
+    """Прогресс к якорю 5:1 ∈ [0,1]. plus=0 → 0.0; minus=0 при plus>0 → 1.0."""
+    if plus <= 0:
+        return 0.0
+    if minus <= 0:
+        return 1.0
+    return min(1.0, (plus / minus) / 5.0)
+
+
+async def resolve_couple(tg_id: int) -> int:
+    """couple_id пары: из atm_quiz.pair_src если есть пара, иначе собственный tg_id
+    (соло, partner_id=NULL). Создаёт запись couples при первом обращении. Крэш-сейф:
+    сбой чтения → деградируем на соло (couple_id = tg_id), поток не роняем."""
+    pair_src = None
+    try:
+        row = await _exec(
+            "SELECT pair_src FROM atm_quiz WHERE tg_id = ?", (tg_id,), fetch="one")
+        pair_src = (row or {}).get("pair_src")
+    except Exception:
+        logger.warning("resolve_couple read pair_src failed (continuing)", exc_info=True)
+    if pair_src:
+        couple_id, partner_id = int(pair_src), tg_id
+    else:
+        couple_id, partner_id = tg_id, None
+    try:
+        await _exec(
+            "INSERT OR IGNORE INTO couples (couple_id, partner_id) VALUES (?, ?)",
+            (couple_id, partner_id))
+        # инициатор мог создать соло-строку раньше (partner_id NULL) — фиксируем пару
+        if partner_id is not None:
+            await _exec(
+                "UPDATE couples SET partner_id = ? "
+                "WHERE couple_id = ? AND partner_id IS NULL",
+                (partner_id, couple_id))
+    except Exception:
+        logger.warning("resolve_couple upsert failed (continuing)", exc_info=True)
+    return couple_id
+
+
+async def bank_add(couple_id: int, kind: str, sign: int = 1,
+                   day_key: str | None = None) -> bool:
+    """Идемпотентный INSERT OR IGNORE поворота в bank_ledger. day_key по умолчанию =
+    сегодня UTC. True — если реально добавили (не дубль за день по UNIQUE), False —
+    дубль/сбой. Крэш-сейф.
+    ponytail: SELECT-до-INSERT даёт честный возврат (у _exec нет rowcount); UNIQUE
+    в БД гарантирует отсутствие дубля даже при гонке. Парный gate (+1 только по
+    подтверждению партнёра) живёт в местах вызова — примитив тупой и переиспользуемый."""
+    dk = _bank_day_key(day_key)
+    try:
+        existing = await _exec(
+            "SELECT 1 FROM bank_ledger WHERE couple_id = ? AND kind = ? AND day_key = ?",
+            (couple_id, kind, dk), fetch="one")
+        await _exec(
+            "INSERT OR IGNORE INTO bank_ledger (couple_id, kind, sign, day_key) "
+            "VALUES (?, ?, ?, ?)",
+            (couple_id, kind, int(sign), dk))
+    except Exception:
+        logger.warning("bank_add failed (continuing)", exc_info=True)
+        return False
+    return existing is None
+
+
+async def get_bank(couple_id: int) -> dict:
+    """Состояние банка пары → {plus, minus, ratio_str, turns, progress_to_5}.
+    plus = SUM положительных знаков, minus = |SUM отрицательных|, turns = plus.
+    SUM по ledger на чтение, без кэша (N мал). Крэш-сейф → нулевой банк."""
+    plus = minus = 0
+    try:
+        row = await _exec(
+            "SELECT "
+            "COALESCE(SUM(CASE WHEN sign > 0 THEN sign ELSE 0 END), 0) AS plus, "
+            "COALESCE(SUM(CASE WHEN sign < 0 THEN -sign ELSE 0 END), 0) AS minus "
+            "FROM bank_ledger WHERE couple_id = ?",
+            (couple_id,), fetch="one")
+        plus = int((row or {}).get("plus") or 0)
+        minus = int((row or {}).get("minus") or 0)
+    except Exception:
+        logger.warning("get_bank failed (continuing)", exc_info=True)
+    return {
+        "plus": plus,
+        "minus": minus,
+        "ratio_str": _bank_ratio_str(plus, minus),
+        "turns": plus,
+        "progress_to_5": _bank_progress_to_5(plus, minus),
+    }
+
+
+async def merge_banks(canonical_couple_id: int, other_couple_id: int) -> None:
+    """Слить соло-банк other в canonical при образовании пары: repoint ledger,
+    погасить дубли по UNIQUE, удалить осиротевшую строку other, проставить
+    partner_id. Идемпотентно (повторный вызов — no-op), крэш-сейф.
+    ponytail: UPDATE OR IGNORE гасит коллизию kind+day_key (обе стороны сделали
+    один kind в один день) — остаётся canonical-строка, непереехавший дубль other
+    чистим DELETE ниже; счёт не задваивается и обе стороны не теряются."""
+    if canonical_couple_id == other_couple_id:
+        return
+    try:
+        await _exec(
+            "UPDATE OR IGNORE bank_ledger SET couple_id = ? WHERE couple_id = ?",
+            (canonical_couple_id, other_couple_id))
+        await _exec("DELETE FROM bank_ledger WHERE couple_id = ?", (other_couple_id,))
+        # гарантируем строку canonical (обычно её создал resolve_couple) и фиксируем пару
+        await _exec(
+            "INSERT OR IGNORE INTO couples (couple_id, partner_id) VALUES (?, ?)",
+            (canonical_couple_id, other_couple_id))
+        await _exec(
+            "UPDATE couples SET partner_id = ? "
+            "WHERE couple_id = ? AND partner_id IS NULL",
+            (other_couple_id, canonical_couple_id))
+        await _exec("DELETE FROM couples WHERE couple_id = ?", (other_couple_id,))
+    except Exception:
+        logger.warning("merge_banks failed (continuing)", exc_info=True)
+
+
+async def render_bank_card(couple_id: int) -> str:
+    """Единый текст-карточка банка пары — ОДИН вид для всех 5 поверхностей
+    (gap-карта, recap 6-секунд, чек-ин, дневная монета, недельный отчёт клуба).
+    Тон анти-лайфкоучинг: арифметика поворотов, без похвалы и стоп-фраз.
+    ponytail: ПЛЕЙСХОЛДЕР-ТЕКСТ — smyslovik отполирует формулировки, designer даст
+    визуал карточки. Структура (цифра-соотношение + прогресс к 5:1 + N поворотов)
+    фиксирована; шлётся parse_mode=None (символы могут ломать Markdown)."""
+    b = await get_bank(couple_id)
+    filled = round(b["progress_to_5"] * 5)
+    bar = "▰" * filled + "▱" * (5 - filled)
+    return (
+        f"Ваш банк: {b['ratio_str']}\n"
+        f"{bar}  к цели 5:1\n"
+        f"Поворотов-к: {b['turns']}"
+    )
