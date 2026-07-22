@@ -156,6 +156,16 @@ CREATE TABLE IF NOT EXISTS followups (
     sent_at TIMESTAMP,
     status TEXT DEFAULT 'due'
 );
+
+CREATE TABLE IF NOT EXISTS atm_quiz (
+    tg_id INTEGER PRIMARY KEY,
+    answers TEXT,
+    scores TEXT,
+    weak TEXT,
+    pair_src INTEGER,
+    nextday_sent INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -392,6 +402,19 @@ _RUNTIME_MIGRATIONS = (
     # Крэш-сейф ALTER как остальные.
     "ALTER TABLE users ADD COLUMN purchase_stage TEXT",
     "ALTER TABLE users ADD COLUMN purchase_stage_at TIMESTAMP",
+    # ── Пивот E1 (T1): тест «Атмосфера дома» — 12 вопросов, 4 опоры.
+    # PRIMARY KEY tg_id: повторное прохождение перезаписывает (retake разрешён).
+    # pair_src = tg_id инициатора пары (deeplink pair_<uid>) — связь пары.
+    # nextday_sent — флаг next-day чека (~20 ч), см. quiz_atmosfera.run_atm_nextday_tick.
+    """CREATE TABLE IF NOT EXISTS atm_quiz (
+        tg_id INTEGER PRIMARY KEY,
+        answers TEXT,
+        scores TEXT,
+        weak TEXT,
+        pair_src INTEGER,
+        nextday_sent INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
 )
 
 
@@ -1637,3 +1660,52 @@ async def growth_counts():
         "SELECT status, COUNT(*) AS n FROM growth_drafts GROUP BY status",
         fetch="all") or []
     return {r["status"]: int(r["n"]) for r in rows}
+
+
+# ── Пивот E1 (T1): тест «Атмосфера дома» ─────────────────────────────────────
+
+async def atm_save_result(tg_id: int, answers_json: str, scores_json: str,
+                          weak: str, pair_src: int | None = None):
+    """Upsert результата теста: retake перезаписывает; next-day чек сбрасывается
+    на новый круг. pair_src не затираем NULL'ом при соло-перепрохождении."""
+    await _exec(
+        "INSERT INTO atm_quiz (tg_id, answers, scores, weak, pair_src, "
+        "nextday_sent, created_at) VALUES (?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(tg_id) DO UPDATE SET "
+        "answers = excluded.answers, scores = excluded.scores, "
+        "weak = excluded.weak, "
+        "pair_src = COALESCE(excluded.pair_src, atm_quiz.pair_src), "
+        "nextday_sent = 0, created_at = CURRENT_TIMESTAMP",
+        (tg_id, answers_json, scores_json, weak, pair_src))
+
+
+async def atm_get_result(tg_id: int):
+    """Результат теста юзера → dict | None. Крэш-сейф (нет таблицы → None)."""
+    try:
+        return await _exec("SELECT * FROM atm_quiz WHERE tg_id = ?",
+                           (tg_id,), fetch="one")
+    except Exception:
+        logger.warning("atm_get_result failed (continuing)", exc_info=True)
+        return None
+
+
+async def atm_nextday_due(hours: int = 20, limit: int = 50):
+    """Кому пора слать next-day чек: прошли тест ≥N часов назад, ещё не слали.
+    Крэш-сейф → []."""
+    try:
+        return await _exec(
+            "SELECT tg_id FROM atm_quiz WHERE nextday_sent = 0 "
+            f"AND datetime(created_at, '+{int(hours)} hours') < datetime('now') "
+            f"LIMIT {int(limit)}", fetch="all") or []
+    except Exception:
+        logger.warning("atm_nextday_due failed (continuing)", exc_info=True)
+        return []
+
+
+async def atm_mark_nextday(tg_id: int):
+    """Метка «next-day чек отправлен» — ДО отправки (антидубль). Крэш-сейф."""
+    try:
+        await _exec("UPDATE atm_quiz SET nextday_sent = 1 WHERE tg_id = ?",
+                    (tg_id,))
+    except Exception:
+        logger.warning("atm_mark_nextday failed (continuing)", exc_info=True)

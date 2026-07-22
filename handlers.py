@@ -314,6 +314,27 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         await message.answer(WELCOME_NO_POVOROT, reply_markup=_onramp_keyboard())
         return
 
+    # Пивот E1 (T1): тест «Атмосфера дома». ВАЖНО: обе ветки ДО _split_source —
+    # бэр-токены «test»/«pair_<uid>» атрибуция съела бы как метку источника.
+    # pair_<uid> — парный флоу (uid = tg_id инициатора); допускаем суффикс «__tag».
+    if args.startswith("pair_"):
+        core, source = _split_source(args) if "__" in args else (args, None)
+        uid = core[len("pair_"):]
+        if uid.lstrip("-").isdigit():
+            await upsert_user(user.id, user.username, user.first_name)
+            await set_user_source(user.id, source)
+            from quiz_atmosfera import start_atm_quiz
+            await start_atm_quiz(message, source=source, pair_src=int(uid))
+            return
+    # Соло-вход: ?start=test | yt* | pin* → сразу тест (мандат ТЗ E1 22.07).
+    if args == "test" or args.startswith(("yt", "pin")):
+        _, source = _split_source(args)
+        await upsert_user(user.id, user.username, user.first_name)
+        await set_user_source(user.id, source or args)
+        from quiz_atmosfera import start_atm_quiz
+        await start_atm_quiz(message, source=source or args)
+        return
+
     args, source = _split_source(args)
 
     # Тест тёмных архетипов с полным распределением: /start s_<10 символов>.

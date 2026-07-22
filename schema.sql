@@ -70,3 +70,12 @@ CREATE TABLE IF NOT EXISTS ai_messages (
     content TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS atm_quiz (
+    tg_id INTEGER PRIMARY KEY,
+    answers TEXT,
+    scores TEXT,
+    weak TEXT,
+    pair_src INTEGER,
+    nextday_sent INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
