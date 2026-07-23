@@ -190,6 +190,15 @@ CREATE TABLE IF NOT EXISTS sixsec (
     last_sent_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS checkin_ledger (
+    couple_id INTEGER,
+    day_key TEXT,
+    tg_id INTEGER,
+    answer INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(couple_id, day_key, tg_id)
+);
 """
 
 
@@ -1913,6 +1922,64 @@ async def render_bank_card(couple_id: int) -> str:
         f"{bar}  к цели 5:1\n"
         f"Поворотов-к: {b['turns']}"
     )
+
+
+# ── Ежедневный чек-ин + reveal (парный gate банка) ───────────────────────────
+# Оба партнёра независимо отмечают «поворот друг к другу?». Банк 5:1 растёт ТОЛЬКО
+# когда ОБА подтвердили (both_yes) — канон «мне ОТВЕТИЛИ», подтверждение партнёра,
+# а не само-отчёт. Идемпотентность per (couple, day, tg_id): первый ответ дня фиксирован.
+
+async def couple_partner(couple_id: int, tg_id: int) -> int | None:
+    """Второй участник пары для tg_id, или None если соло (partner_id NULL).
+    Пара = couple_id (инициатор) + partner_id. Крэш-сейф → None."""
+    try:
+        row = await _exec("SELECT partner_id FROM couples WHERE couple_id = ?",
+                          (couple_id,), fetch="one")
+        pid = (row or {}).get("partner_id")
+    except Exception:
+        logger.warning("couple_partner failed (continuing)", exc_info=True)
+        return None
+    if not pid:
+        return None
+    return couple_id if tg_id != couple_id else int(pid)
+
+
+async def checkin_set(couple_id: int, tg_id: int, yes: bool,
+                      day_key: str | None = None) -> None:
+    """Записать ответ партнёра на дневной чек-ин. Идемпотентно per (couple,day,tg_id):
+    INSERT OR IGNORE — первый ответ дня фиксирован, повторный тап не перезаписывает.
+    Крэш-сейф."""
+    dk = _bank_day_key(day_key)
+    try:
+        await _exec(
+            "INSERT OR IGNORE INTO checkin_ledger (couple_id, day_key, tg_id, answer) "
+            "VALUES (?, ?, ?, ?)",
+            (couple_id, dk, tg_id, 1 if yes else 0))
+    except Exception:
+        logger.warning("checkin_set failed (continuing)", exc_info=True)
+
+
+async def checkin_day(couple_id: int, day_key: str | None = None) -> dict:
+    """Состояние дневного чек-ина → {answers:{tg_id:bool}, n, both_answered, both_yes}.
+    both_answered = ответили 2 разных tg_id. both_yes = оба «Да» (партнёрское
+    подтверждение поворота → парный gate банка). Крэш-сейф → пусто."""
+    dk = _bank_day_key(day_key)
+    answers: dict[int, bool] = {}
+    try:
+        rows = await _exec(
+            "SELECT tg_id, answer FROM checkin_ledger WHERE couple_id = ? AND day_key = ?",
+            (couple_id, dk), fetch="all")
+        for r in rows or []:
+            answers[int((r or {}).get("tg_id"))] = bool((r or {}).get("answer"))
+    except Exception:
+        logger.warning("checkin_day failed (continuing)", exc_info=True)
+    both_answered = len(answers) >= 2
+    return {
+        "answers": answers,
+        "n": len(answers),
+        "both_answered": both_answered,
+        "both_yes": both_answered and all(answers.values()),
+    }
 
 
 # ── «6 секунд»: 3 вечера микро-действий под слабую опору (Шаг 2, on-ramp) ─────

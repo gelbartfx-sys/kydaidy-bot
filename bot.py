@@ -39,6 +39,7 @@ from followup import run_followup_tick
 from nurture import run_nurture_tick
 from quiz_atmosfera import atm_router, run_atm_nextday_tick
 from sixsec import sixsec_router, run_sixsec_tick
+from checkin import checkin_router
 from webhooks import setup_webhooks
 
 logging.basicConfig(
@@ -157,6 +158,10 @@ async def main():
     # router, чтобы не съел catch-all fallback. Инвайт в конце реюзит atmq:invite
     # (в atm_router выше). Только callback'и, текст-фильтров нет — конфликтов нет.
     dp.include_router(sixsec_router)
+    # checkin_router: /checkin + callback chk:* — только callback'и + команда,
+    # текст-фильтров нет (конфликтов с главным router нет). Узел кольца: парный
+    # gate банка (подтверждение партнёра), чинит рост банка на само-отчёт в sixsec.
+    dp.include_router(checkin_router)
     dp.include_router(router)
 
     # Запуск nurture-tick каждый час
